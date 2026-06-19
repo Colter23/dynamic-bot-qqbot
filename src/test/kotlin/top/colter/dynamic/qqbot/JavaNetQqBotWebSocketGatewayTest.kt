@@ -307,7 +307,7 @@ class JavaNetQqBotWebSocketGatewayTest {
         val receipt = gateway.sendGroupMediaMessage(
             accountId = "app-id",
             groupOpenid = "group-openid",
-            media = QqBotUrlMedia(QqBotMediaFileType.IMAGE, "https://example.com/a.png"),
+            media = QqBotMediaResourceSource(QqBotMediaFileType.IMAGE, url = "https://example.com/a.png"),
             request = QqBotSendRequest(content = "图片说明", msgType = QQBOT_MEDIA_MSG_TYPE),
         )
 
@@ -316,6 +316,45 @@ class JavaNetQqBotWebSocketGatewayTest {
         assertEquals("https://api.sgroup.qq.com/v2/groups/group-openid/messages", transport.posts[2].url)
         val sendBody = Json.parseToJsonElement(transport.posts[2].body).jsonObject
         assertEquals(7, sendBody.getValue("msg_type").jsonPrimitive.int)
+        assertEquals("file-info-1", sendBody.getValue("media").jsonObject.getValue("file_info").jsonPrimitive.content)
+    }
+
+    @Test
+    fun `就绪网关可以使用 base64 文件数据登记富媒体`() = runTest {
+        val connector = FakeQqBotWebSocketConnector()
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}"""),
+                    QqBotHttpResponse(200, """{"file_info":"file-info-1","ttl":3600}"""),
+                    QqBotHttpResponse(200, """{"id":"user-media-send-1"}"""),
+                ),
+            ),
+            getResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"url":"wss://api.sgroup.qq.com/websocket","shards":1}""")),
+            ),
+        )
+        val gateway = testGateway(connector = connector, transport = transport)
+
+        gateway.connect { }
+        connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        connector.listener.onText("""{"op":0,"s":88,"t":"READY","d":{"session_id":"session-a"}}""")
+
+        val receipt = gateway.sendUserMediaMessage(
+            accountId = "app-id",
+            openid = "user-openid",
+            media = QqBotMediaResourceSource(
+                fileType = QqBotMediaFileType.IMAGE,
+                fileDataBase64 = "aW1hZ2UtYnl0ZXM=",
+            ),
+            request = QqBotSendRequest(content = "图片说明", msgType = QQBOT_MEDIA_MSG_TYPE),
+        )
+
+        assertEquals("user-media-send-1", receipt.messageId)
+        assertEquals("https://api.sgroup.qq.com/v2/users/user-openid/files", transport.posts[1].url)
+        val prepareBody = Json.parseToJsonElement(transport.posts[1].body).jsonObject
+        assertEquals("aW1hZ2UtYnl0ZXM=", prepareBody.getValue("file_data").jsonPrimitive.content)
+        val sendBody = Json.parseToJsonElement(transport.posts[2].body).jsonObject
         assertEquals("file-info-1", sendBody.getValue("media").jsonObject.getValue("file_info").jsonPrimitive.content)
     }
 

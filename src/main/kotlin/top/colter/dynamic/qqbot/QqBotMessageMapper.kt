@@ -35,9 +35,10 @@ internal enum class QqBotMediaFileType(val code: Int, val label: String) {
     AUDIO(3, "语音"),
 }
 
-internal data class QqBotUrlMedia(
+internal data class QqBotMediaResourceSource(
     val fileType: QqBotMediaFileType,
-    val url: String,
+    val url: String? = null,
+    val fileDataBase64: String? = null,
 )
 
 internal sealed interface QqBotSendPlanItem {
@@ -48,7 +49,7 @@ internal sealed interface QqBotSendPlanItem {
     ) : QqBotSendPlanItem
 
     data class Media(
-        val media: QqBotUrlMedia,
+        val media: QqBotMediaResourceSource,
         override val request: QqBotSendRequest,
     ) : QqBotSendPlanItem
 }
@@ -102,15 +103,15 @@ internal object QqBotMessageMapper {
         }
 
         fun addMedia(fileType: QqBotMediaFileType, uri: String, fallbackText: String) {
-            val url = uri.toHttpUrlOrNull()
-            if (url == null) {
-                addText(fallbackText.ifBlank { "（暂不支持发送${fileType.label}，请使用 HTTP(S) URL）" })
+            val source = uri.toMediaResourceSourceOrNull(fileType)
+            if (source == null) {
+                addText(fallbackText.ifBlank { "（暂不支持发送${fileType.label}，请使用 HTTP(S) URL 或 base64 数据）" })
                 return
             }
 
             flushText()
             items += QqBotSendPlanItem.Media(
-                media = QqBotUrlMedia(fileType = fileType, url = url),
+                media = source,
                 request = nextRequest(
                     content = fallbackText.trim().ifBlank { " " },
                     msgType = QQBOT_MEDIA_MSG_TYPE,
@@ -155,6 +156,12 @@ internal object QqBotMessageMapper {
             .firstOrNull()
     }
 
+    private fun String.toMediaResourceSourceOrNull(fileType: QqBotMediaFileType): QqBotMediaResourceSource? {
+        toHttpUrlOrNull()?.let { url -> return QqBotMediaResourceSource(fileType = fileType, url = url) }
+        toBase64DataOrNull()?.let { data -> return QqBotMediaResourceSource(fileType = fileType, fileDataBase64 = data) }
+        return null
+    }
+
     private fun String.toHttpUrlOrNull(): String? {
         val value = trim()
         if (value.isBlank()) return null
@@ -163,6 +170,12 @@ internal object QqBotMessageMapper {
         if (scheme != "http" && scheme != "https") return null
         if (uri.host.isNullOrBlank()) return null
         return value
+    }
+
+    private fun String.toBase64DataOrNull(): String? {
+        val value = trim()
+        if (!value.startsWith(BASE64_URI_PREFIX, ignoreCase = true)) return null
+        return value.substring(BASE64_URI_PREFIX.length).trim().takeIf { it.isNotBlank() }
     }
 }
 
@@ -319,3 +332,4 @@ internal const val QQBOT_GROUP_AT_MESSAGE_CREATE: String = "GROUP_AT_MESSAGE_CRE
 internal const val QQBOT_TEXT_MSG_TYPE: Int = 0
 internal const val QQBOT_MEDIA_MSG_TYPE: Int = 7
 private const val QQBOT_EMPTY_MESSAGE_TEXT: String = "（空消息）"
+private const val BASE64_URI_PREFIX: String = "base64://"

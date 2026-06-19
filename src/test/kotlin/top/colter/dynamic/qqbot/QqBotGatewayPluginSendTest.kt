@@ -20,6 +20,11 @@ import top.colter.dynamic.core.plugin.MessageDeliveryRequest
 import top.colter.dynamic.core.plugin.MessageRecallRequest
 import top.colter.dynamic.core.plugin.MessageRecallResult
 import top.colter.dynamic.core.plugin.MessageSendResult
+import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryAdviceRequest
+import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryConfidence
+import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryMethod
+import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryProbeRequest
+import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryProbeStatus
 import top.colter.dynamic.core.plugin.MessageSinkRouteState
 
 class QqBotGatewayPluginSendTest {
@@ -107,6 +112,67 @@ class QqBotGatewayPluginSendTest {
         assertIs<MessageSendResult.Sent>(result)
         assertEquals(listOf("app-id:user:user-openid:本地图片"), gateway.sendCalls)
         assertEquals(emptyList(), gateway.mediaCalls)
+    }
+
+    @Test
+    fun `普通发送 base64 图片走 file_data 富媒体消息`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendMessage(
+            request = deliveryRequest(
+                target = TargetAddress.of("qq", TargetKind.USER, "user-openid"),
+                batches = listOf(
+                    MessageBatch(
+                        listOf(
+                            MessageContent.Image(
+                                fallbackText = "图片说明",
+                                image = MediaRef(uri = "base64://aW1hZ2UtYnl0ZXM=", kind = MediaKind.IMAGE),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            routeId = "qqbot:qq:app-id",
+        )
+
+        assertIs<MessageSendResult.Sent>(result)
+        assertEquals("aW1hZ2UtYnl0ZXM=", gateway.mediaCalls.single().fileDataBase64)
+        assertEquals(
+            listOf("app-id:user-media:user-openid:IMAGE:aW1hZ2UtYnl0ZXM=:图片说明"),
+            gateway.sendCalls,
+        )
+    }
+
+    @Test
+    fun `媒体投递建议禁用本地文件并保留签名链接为未知`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        plugin.setPrivate("gateway", FakeGateway())
+        plugin.setPrivate("running", true)
+
+        val advice = plugin.adviseMediaDelivery(
+            MessageSinkMediaDeliveryAdviceRequest(routeId = "qqbot:qq:app-id"),
+        )
+        val localProbe = plugin.probeMediaDelivery(
+            MessageSinkMediaDeliveryProbeRequest(
+                routeId = "qqbot:qq:app-id",
+                method = MessageSinkMediaDeliveryMethod.LOCAL_FILE,
+                uri = "file:/tmp/a.png",
+            ),
+        )
+        val signedUrlProbe = plugin.probeMediaDelivery(
+            MessageSinkMediaDeliveryProbeRequest(
+                routeId = "qqbot:qq:app-id",
+                method = MessageSinkMediaDeliveryMethod.SIGNED_URL,
+                uri = "http://127.0.0.1:8080/media/outbound/a",
+            ),
+        )
+
+        assertEquals(MessageSinkMediaDeliveryConfidence.UNAVAILABLE, advice.localFileConfidence)
+        assertEquals(MessageSinkMediaDeliveryProbeStatus.UNAVAILABLE, localProbe.status)
+        assertEquals(MessageSinkMediaDeliveryProbeStatus.UNKNOWN, signedUrlProbe.status)
     }
 
     @Test
@@ -296,7 +362,7 @@ class QqBotGatewayPluginSendTest {
     ) : QqBotGateway {
         val sendCalls: MutableList<String> = mutableListOf()
         val sentRequests: MutableList<QqBotSendRequest> = mutableListOf()
-        val mediaCalls: MutableList<QqBotUrlMedia> = mutableListOf()
+        val mediaCalls: MutableList<QqBotMediaResourceSource> = mutableListOf()
         val recallCalls: MutableList<String> = mutableListOf()
 
         override suspend fun connect(onIncomingEvent: (QqBotIncomingEvent) -> Unit) {
@@ -329,24 +395,24 @@ class QqBotGatewayPluginSendTest {
         override suspend fun sendUserMediaMessage(
             accountId: String,
             openid: String,
-            media: QqBotUrlMedia,
+            media: QqBotMediaResourceSource,
             request: QqBotSendRequest,
         ): QqBotSendReceipt {
             sentRequests += request
             mediaCalls += media
-            sendCalls += "$accountId:user-media:$openid:${media.fileType}:${media.url}:${request.content}"
+            sendCalls += "$accountId:user-media:$openid:${media.fileType}:${media.debugValue()}:${request.content}"
             return QqBotSendReceipt(messageId = "user-media-send-1")
         }
 
         override suspend fun sendGroupMediaMessage(
             accountId: String,
             groupOpenid: String,
-            media: QqBotUrlMedia,
+            media: QqBotMediaResourceSource,
             request: QqBotSendRequest,
         ): QqBotSendReceipt {
             sentRequests += request
             mediaCalls += media
-            sendCalls += "$accountId:group-media:$groupOpenid:${media.fileType}:${media.url}:${request.content}"
+            sendCalls += "$accountId:group-media:$groupOpenid:${media.fileType}:${media.debugValue()}:${request.content}"
             return QqBotSendReceipt(messageId = "group-media-send-1")
         }
 
@@ -359,6 +425,10 @@ class QqBotGatewayPluginSendTest {
         }
 
         override fun close() {
+        }
+
+        private fun QqBotMediaResourceSource.debugValue(): String {
+            return url ?: fileDataBase64.orEmpty()
         }
     }
 }

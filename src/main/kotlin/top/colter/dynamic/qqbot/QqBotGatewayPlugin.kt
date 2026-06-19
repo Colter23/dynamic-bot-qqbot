@@ -21,6 +21,13 @@ import top.colter.dynamic.core.plugin.MessageRecallRequest
 import top.colter.dynamic.core.plugin.MessageRecallResult
 import top.colter.dynamic.core.plugin.MessageSendResult
 import top.colter.dynamic.core.plugin.MessageSinkFeature
+import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryAdvice
+import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryAdviceRequest
+import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryAdvisor
+import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryConfidence
+import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryMethod
+import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryProbeRequest
+import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryProbeResult
 import top.colter.dynamic.core.plugin.MessageSinkRoute
 import top.colter.dynamic.core.plugin.MessageSinkRouteState
 import top.colter.dynamic.core.plugin.MessageTargetCandidate
@@ -33,6 +40,7 @@ internal const val QQBOT_PLUGIN_ID: String = "qqbot-gateway"
 
 public class QqBotGatewayPlugin :
     AccountRoutedMessageSinkPlugin,
+    MessageSinkMediaDeliveryAdvisor,
     ConfigurablePlugin<QqBotConfig> {
 
     private var pluginId: String = QQBOT_PLUGIN_ID
@@ -304,6 +312,34 @@ public class QqBotGatewayPlugin :
         )
     }
 
+    override suspend fun adviseMediaDelivery(
+        request: MessageSinkMediaDeliveryAdviceRequest,
+    ): MessageSinkMediaDeliveryAdvice {
+        if (!running) return MessageSinkMediaDeliveryAdvice()
+        if (request.accountIdFromRequest() == null) return MessageSinkMediaDeliveryAdvice()
+        return MessageSinkMediaDeliveryAdvice(
+            clientName = transportName,
+            localFileConfidence = MessageSinkMediaDeliveryConfidence.UNAVAILABLE,
+        )
+    }
+
+    override suspend fun probeMediaDelivery(
+        request: MessageSinkMediaDeliveryProbeRequest,
+    ): MessageSinkMediaDeliveryProbeResult {
+        if (!running) return MessageSinkMediaDeliveryProbeResult.unknown("QQ 官方机器人插件未运行")
+        if (request.accountIdFromRequest() == null) {
+            return MessageSinkMediaDeliveryProbeResult.unknown("缺少 QQ 官方机器人账号")
+        }
+        return when (request.method) {
+            MessageSinkMediaDeliveryMethod.LOCAL_FILE -> MessageSinkMediaDeliveryProbeResult.unavailable(
+                "QQ 官方机器人 OpenAPI 不能直接读取机器人部署机器的本地文件",
+            )
+            MessageSinkMediaDeliveryMethod.SIGNED_URL -> MessageSinkMediaDeliveryProbeResult.unknown(
+                "QQ 官方机器人签名链接需要腾讯服务器可公网访问，插件无法在本机可靠探测",
+            )
+        }
+    }
+
     internal fun onIncomingEvent(event: QqBotIncomingEvent) {
         if (!running || !config.autoPublishIncoming) return
         val incoming = QqBotIncomingMessageMapper.toIncomingMessage(event)
@@ -420,6 +456,16 @@ public class QqBotGatewayPlugin :
         return routeId.removePrefix(prefix)
             .takeIf { it != routeId }
             ?.takeIf { it.isNotBlank() }
+    }
+
+    private fun MessageSinkMediaDeliveryAdviceRequest.accountIdFromRequest(): String? {
+        return routeId?.let(::accountIdFromRoute)
+            ?: accountId?.trim()?.takeIf { it.isNotBlank() }
+    }
+
+    private fun MessageSinkMediaDeliveryProbeRequest.accountIdFromRequest(): String? {
+        return routeId?.let(::accountIdFromRoute)
+            ?: accountId?.trim()?.takeIf { it.isNotBlank() }
     }
 }
 

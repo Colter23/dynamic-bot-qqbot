@@ -105,13 +105,13 @@ internal class JavaNetQqBotWebSocketGateway(
     override suspend fun sendUserMediaMessage(
         accountId: String,
         openid: String,
-        media: QqBotUrlMedia,
+        media: QqBotMediaResourceSource,
         request: QqBotSendRequest,
     ): QqBotSendReceipt = withContext(Dispatchers.IO) {
         requireAccount(accountId)
         val resource = openApiClient.prepareUserMedia(
             openid = openid,
-            request = QqBotMediaPrepareRequest(fileType = media.fileType, url = media.url),
+            request = media.toPrepareRequest(),
         )
         openApiClient.sendUserMessage(openid, request.copy(mediaFileInfo = resource.fileInfo))
     }
@@ -119,13 +119,13 @@ internal class JavaNetQqBotWebSocketGateway(
     override suspend fun sendGroupMediaMessage(
         accountId: String,
         groupOpenid: String,
-        media: QqBotUrlMedia,
+        media: QqBotMediaResourceSource,
         request: QqBotSendRequest,
     ): QqBotSendReceipt = withContext(Dispatchers.IO) {
         requireAccount(accountId)
         val resource = openApiClient.prepareGroupMedia(
             groupOpenid = groupOpenid,
-            request = QqBotMediaPrepareRequest(fileType = media.fileType, url = media.url),
+            request = media.toPrepareRequest(),
         )
         openApiClient.sendGroupMessage(groupOpenid, request.copy(mediaFileInfo = resource.fileInfo))
     }
@@ -406,6 +406,14 @@ internal class JavaNetQqBotWebSocketGateway(
         runCatching { closeable.close() }
             .onFailure { error -> logger.debug(error) { "QQ 官方机器人可关闭资源清理失败" } }
         clear()
+    }
+
+    private fun QqBotMediaResourceSource.toPrepareRequest(): QqBotMediaPrepareRequest {
+        return QqBotMediaPrepareRequest(
+            fileType = fileType,
+            url = url,
+            fileDataBase64 = fileDataBase64,
+        )
     }
 
     private inner class GatewayListener(

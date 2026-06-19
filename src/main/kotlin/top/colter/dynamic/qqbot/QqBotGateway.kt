@@ -22,14 +22,14 @@ internal interface QqBotGateway : AutoCloseable {
     suspend fun sendUserMediaMessage(
         accountId: String,
         openid: String,
-        media: QqBotUrlMedia,
+        media: QqBotMediaResourceSource,
         request: QqBotSendRequest,
     ): QqBotSendReceipt
 
     suspend fun sendGroupMediaMessage(
         accountId: String,
         groupOpenid: String,
-        media: QqBotUrlMedia,
+        media: QqBotMediaResourceSource,
         request: QqBotSendRequest,
     ): QqBotSendReceipt
 
@@ -73,14 +73,14 @@ internal class NoopQqBotGateway : QqBotGateway {
     override suspend fun sendUserMediaMessage(
         accountId: String,
         openid: String,
-        media: QqBotUrlMedia,
+        media: QqBotMediaResourceSource,
         request: QqBotSendRequest,
     ): QqBotSendReceipt = notImplemented()
 
     override suspend fun sendGroupMediaMessage(
         accountId: String,
         groupOpenid: String,
-        media: QqBotUrlMedia,
+        media: QqBotMediaResourceSource,
         request: QqBotSendRequest,
     ): QqBotSendReceipt = notImplemented()
 

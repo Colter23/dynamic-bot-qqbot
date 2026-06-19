@@ -15,7 +15,7 @@ import kotlin.test.assertNull
 
 class QqBotWebSocketProtocolTest {
     @Test
-    fun `intent mask matches official bit definitions`() {
+    fun `事件订阅掩码符合官方位定义`() {
         assertEquals(1 shl 25, QqBotConfig().enabledIntentMask())
         assertEquals(
             (1 shl 25) or (1 shl 26),
@@ -39,7 +39,7 @@ class QqBotWebSocketProtocolTest {
     }
 
     @Test
-    fun `identify payload follows official websocket shape`() {
+    fun `identify 负载符合官方 websocket 格式`() {
         val payload = QqBotWebSocketProtocol.identifyPayload(
             accessToken = " access-token ",
             intentMask = (1 shl 25) or (1 shl 26),
@@ -59,7 +59,7 @@ class QqBotWebSocketProtocolTest {
     }
 
     @Test
-    fun `heartbeat payload carries latest sequence or null`() {
+    fun `心跳负载携带最新序号或 null`() {
         val withSequence = Json.parseToJsonElement(QqBotWebSocketProtocol.heartbeatPayload(42)).jsonObject
         val withoutSequence = Json.parseToJsonElement(QqBotWebSocketProtocol.heartbeatPayload(null)).jsonObject
 
@@ -70,7 +70,7 @@ class QqBotWebSocketProtocolTest {
     }
 
     @Test
-    fun `hello payload exposes heartbeat interval`() {
+    fun `hello 负载暴露心跳间隔`() {
         val hello = QqBotWebSocketProtocol.parseHello(
             """{"op":10,"d":{"heartbeat_interval":45000}}""",
         )
@@ -79,7 +79,7 @@ class QqBotWebSocketProtocolTest {
     }
 
     @Test
-    fun `dispatch payload exposes type sequence and data`() {
+    fun `dispatch 负载暴露类型序号和数据`() {
         val dispatch = QqBotWebSocketProtocol.parseDispatch(
             """{"op":0,"s":123,"t":"C2C_MESSAGE_CREATE","d":{"id":"msg-1","content":"hi"}}""",
         )
@@ -90,7 +90,7 @@ class QqBotWebSocketProtocolTest {
     }
 
     @Test
-    fun `dispatch payload can become gateway incoming event`() {
+    fun `dispatch 负载可以转换为网关入站事件`() {
         val event = QqBotWebSocketProtocol.incomingEventOrNull(
             """{"op":0,"s":123,"t":"GROUP_AT_MESSAGE_CREATE","d":{"id":"msg-1"}}""",
         )
@@ -100,12 +100,12 @@ class QqBotWebSocketProtocolTest {
     }
 
     @Test
-    fun `non dispatch payload is ignored by incoming event conversion`() {
+    fun `非 dispatch 负载在入站事件转换时被忽略`() {
         assertNull(QqBotWebSocketProtocol.incomingEventOrNull("""{"op":11,"d":null}"""))
     }
 
     @Test
-    fun `invalid intent is rejected during config validation`() {
+    fun `无效事件订阅在配置校验时被拒绝`() {
         assertFailsWith<IllegalArgumentException> {
             QqBotConfigForm.validate(QqBotConfig(intents = listOf("GUILD_MESSAGES")))
         }

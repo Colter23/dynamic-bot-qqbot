@@ -11,7 +11,7 @@ import kotlin.test.assertTrue
 
 class QqBotOpenApiClientTest {
     @Test
-    fun `access token request follows official app credential shape`() {
+    fun `访问令牌请求符合官方应用凭据格式`() {
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(
                 listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
@@ -34,7 +34,7 @@ class QqBotOpenApiClientTest {
     }
 
     @Test
-    fun `access token is cached until refresh skew`() {
+    fun `访问令牌在刷新提前量前保持缓存`() {
         var now = 10_000L
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(
@@ -61,7 +61,7 @@ class QqBotOpenApiClientTest {
     }
 
     @Test
-    fun `gateway bot endpoint uses QQBot authorization and parses limits`() {
+    fun `网关接入点使用 QQBot 授权并解析限制信息`() {
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(
                 listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
@@ -104,7 +104,7 @@ class QqBotOpenApiClientTest {
     }
 
     @Test
-    fun `openapi error includes status code business code and message`() {
+    fun `openapi 错误包含状态码业务码和消息`() {
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(
                 listOf(QqBotHttpResponse(401, """{"code":11243,"message":"token invalid"}""")),
@@ -125,7 +125,7 @@ class QqBotOpenApiClientTest {
     }
 
     @Test
-    fun `gateway endpoint rejects missing url`() {
+    fun `网关接入点拒绝缺失 url 的响应`() {
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(
                 listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
@@ -147,7 +147,7 @@ class QqBotOpenApiClientTest {
     }
 
     @Test
-    fun `user message send posts official text payload`() {
+    fun `单聊消息发送提交官方文本负载`() {
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(
                 listOf(
@@ -182,7 +182,7 @@ class QqBotOpenApiClientTest {
     }
 
     @Test
-    fun `group message send can post plain text without reply id`() {
+    fun `群聊消息发送可以提交无回复 id 的纯文本`() {
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(
                 listOf(

@@ -12,7 +12,7 @@ import top.colter.dynamic.core.plugin.MessageSinkRouteState
 
 class JavaNetQqBotWebSocketGatewayTest {
     @Test
-    fun `connect fetches endpoint and opens websocket`() = runTest {
+    fun `连接时获取接入点并打开 websocket`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val gateway = testGateway(connector = connector)
 
@@ -22,7 +22,7 @@ class JavaNetQqBotWebSocketGatewayTest {
         assertEquals(
             QqBotRuntimeAccount(
                 accountId = "app-id",
-                name = "QQ official bot app-id",
+                name = "QQ 官方机器人 app-id",
                 state = MessageSinkRouteState.UNAVAILABLE,
             ),
             gateway.availableAccounts().single(),
@@ -30,7 +30,7 @@ class JavaNetQqBotWebSocketGatewayTest {
     }
 
     @Test
-    fun `hello sends identify and schedules heartbeat`() = runTest {
+    fun `收到 hello 后发送 identify 并安排心跳`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
         val gateway = testGateway(connector = connector, heartbeatScheduler = heartbeatScheduler)
@@ -52,7 +52,7 @@ class JavaNetQqBotWebSocketGatewayTest {
     }
 
     @Test
-    fun `heartbeat uses latest dispatch sequence`() = runTest {
+    fun `心跳使用最新的 dispatch 序号`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
         val gateway = testGateway(connector = connector, heartbeatScheduler = heartbeatScheduler)
@@ -70,7 +70,7 @@ class JavaNetQqBotWebSocketGatewayTest {
     }
 
     @Test
-    fun `dispatch payload is forwarded to incoming handler`() = runTest {
+    fun `dispatch 负载会转发给入站处理器`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val gateway = testGateway(connector = connector)
         val events = mutableListOf<QqBotIncomingEvent>()
@@ -83,7 +83,7 @@ class JavaNetQqBotWebSocketGatewayTest {
     }
 
     @Test
-    fun `close cancels heartbeat and closes websocket`() = runTest {
+    fun `关闭时取消心跳并关闭 websocket`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
         val gateway = testGateway(connector = connector, heartbeatScheduler = heartbeatScheduler)
@@ -94,12 +94,12 @@ class JavaNetQqBotWebSocketGatewayTest {
 
         assertEquals(true, heartbeatScheduler.scheduled.single().closed)
         assertEquals(1000, connector.session.closedStatusCode)
-        assertEquals("shutdown", connector.session.closedReason)
+        assertEquals("插件停止", connector.session.closedReason)
         assertEquals(MessageSinkRouteState.UNAVAILABLE, gateway.availableAccounts().single().state)
     }
 
     @Test
-    fun `remote close marks account unavailable`() = runTest {
+    fun `远端关闭后标记账号不可用`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val gateway = testGateway(connector = connector)
 
@@ -113,7 +113,7 @@ class JavaNetQqBotWebSocketGatewayTest {
     }
 
     @Test
-    fun `remote close schedules reconnect and opens a fresh websocket`() = runTest {
+    fun `远端关闭后安排重连并打开新 websocket`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
         val reconnectScheduler = FakeQqBotReconnectScheduler()
@@ -148,7 +148,7 @@ class JavaNetQqBotWebSocketGatewayTest {
     }
 
     @Test
-    fun `gateway reconnect opcode closes current websocket and schedules reconnect`() = runTest {
+    fun `网关重连 opcode 会关闭当前 websocket 并安排重连`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
         val reconnectScheduler = FakeQqBotReconnectScheduler()
@@ -165,12 +165,12 @@ class JavaNetQqBotWebSocketGatewayTest {
         assertEquals(MessageSinkRouteState.UNAVAILABLE, gateway.availableAccounts().single().state)
         assertEquals(true, heartbeatScheduler.scheduled.single().closed)
         assertEquals(4000, connector.session.closedStatusCode)
-        assertEquals("reconnect", connector.session.closedReason)
+        assertEquals("准备重连", connector.session.closedReason)
         assertEquals(1_000L, reconnectScheduler.scheduled.single().delayMillis)
     }
 
     @Test
-    fun `close cancels pending reconnect`() = runTest {
+    fun `关闭时取消等待中的重连`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val reconnectScheduler = FakeQqBotReconnectScheduler()
         val gateway = testGateway(connector = connector, reconnectScheduler = reconnectScheduler)
@@ -183,7 +183,7 @@ class JavaNetQqBotWebSocketGatewayTest {
     }
 
     @Test
-    fun `remote close does not reconnect when disabled`() = runTest {
+    fun `禁用重连时远端关闭不会重连`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val reconnectScheduler = FakeQqBotReconnectScheduler()
         val gateway = testGateway(
@@ -200,7 +200,7 @@ class JavaNetQqBotWebSocketGatewayTest {
     }
 
     @Test
-    fun `ready gateway sends user and group messages through openapi`() = runTest {
+    fun `就绪网关通过 openapi 发送单聊和群聊消息`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(

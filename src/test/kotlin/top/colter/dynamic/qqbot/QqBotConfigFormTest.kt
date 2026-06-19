@@ -5,19 +5,19 @@ import kotlin.test.assertFailsWith
 
 class QqBotConfigFormTest {
     @Test
-    fun `default disabled config is valid`() {
+    fun `默认未启用配置是有效的`() {
         QqBotConfigForm.validate(QqBotConfig())
     }
 
     @Test
-    fun `enabled config requires app credentials`() {
+    fun `启用配置需要应用凭据`() {
         assertFailsWith<IllegalArgumentException> {
             QqBotConfigForm.validate(QqBotConfig(enabled = true))
         }
     }
 
     @Test
-    fun `enabled config accepts minimal credentials`() {
+    fun `启用配置接受最小凭据`() {
         QqBotConfigForm.validate(
             QqBotConfig(
                 enabled = true,

@@ -2,7 +2,7 @@
 
 QQ 官方机器人插件骨架，用于后续通过 QQ 官方 API v2 接入 dynamic-bot。
 
-当前已接入 WebSocket 启动骨架：可获取 access token 与 gateway 地址、连接官方 WebSocket、处理 Hello 后 Identify、发送心跳并分发 Dispatch 事件；已支持将单聊/群聊消息事件映射为 dynamic-bot 入站消息，并可通过 OpenAPI 发送单聊/群聊文本消息。富媒体、撤回、断线自动重连仍在后续补齐。
+当前已接入 WebSocket 网关骨架：可获取访问令牌与网关地址、连接官方 WebSocket、处理 Hello 后 Identify、发送心跳并分发 Dispatch 事件；已支持将单聊/群聊消息事件映射为 dynamic-bot 入站消息，并可通过 OpenAPI 发送单聊/群聊文本消息。WebSocket 断开后支持基础自动重连；富媒体、撤回和会话 Resume 仍在后续补齐。
 
 ## 当前包含
 
@@ -11,7 +11,7 @@ QQ 官方机器人插件骨架，用于后续通过 QQ 官方 API v2 接入 dyna
 - 插件生命周期与配置表单。
 - QQ 官方机器人目标类型占位：单聊用户、群聊。
 - WebSocket opcode、Identify、Heartbeat、Hello、Dispatch 协议模型。
-- access token 获取、缓存刷新、`/gateway/bot` 接入点获取组件。
+- 访问令牌获取、缓存刷新、`/gateway/bot` 接入点获取组件。
 - 基于 Java 标准库 `java.net.http.WebSocket` 的正向 WebSocket 网关骨架。
 - 单聊/群聊文本消息发送与命令结果发送。
 - 撤回、目标列表的接口骨架。
@@ -19,7 +19,7 @@ QQ 官方机器人插件骨架，用于后续通过 QQ 官方 API v2 接入 dyna
 
 ## 预计接入方向
 
-1. 使用 `AppID` 和 `AppSecret` 获取 access token。
+1. 使用 `AppID` 和 `AppSecret` 获取访问令牌。
 2. 通过 `/gateway` 或 `/gateway/bot` 获取 WebSocket 地址。
 3. 连接 QQ 官方 WebSocket，处理 Hello、Identify、Heartbeat、Dispatch。
 4. 将 `C2C_MESSAGE_CREATE` 和 `GROUP_AT_MESSAGE_CREATE` 映射为 dynamic-bot 入站消息。

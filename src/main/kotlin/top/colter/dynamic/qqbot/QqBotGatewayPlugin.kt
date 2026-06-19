@@ -277,7 +277,7 @@ public class QqBotGatewayPlugin :
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Throwable) {
-                    logger.warn(error) { "QQ official bot command publish failed: traceId=${commandRequest.traceId}" }
+                    logger.warn(error) { "QQ 官方机器人命令发布失败：traceId=${commandRequest.traceId}" }
                 }
             }
         }
@@ -292,7 +292,7 @@ public class QqBotGatewayPlugin :
     }
 
     private fun stopIncomingScope() {
-        incomingJob?.cancel("QQ official bot plugin stopped")
+        incomingJob?.cancel("QQ 官方机器人插件已停止")
         incomingJob = null
         incomingScope = null
     }

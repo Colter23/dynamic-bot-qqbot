@@ -46,20 +46,20 @@ internal class QqBotOpenApiClient(
                 },
             ),
         )
-        ensureSuccess("获取 QQ 官方机器人 access token", response)
+        ensureSuccess("获取 QQ 官方机器人访问令牌", response)
 
-        val root = parseResponseObject("获取 QQ 官方机器人 access token", response.body)
+        val root = parseResponseObject("获取 QQ 官方机器人访问令牌", response.body)
         val tokenValue = root["access_token"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
         val expiresInSeconds = root["expires_in"]?.jsonPrimitive?.longOrNull
             ?: throw QqBotOpenApiException(
-                action = "获取 QQ 官方机器人 access token",
+                action = "获取 QQ 官方机器人访问令牌",
                 statusCode = response.statusCode,
                 message = "响应缺少 expires_in",
                 body = response.body,
             )
         if (tokenValue.isBlank()) {
             throw QqBotOpenApiException(
-                action = "获取 QQ 官方机器人 access token",
+                action = "获取 QQ 官方机器人访问令牌",
                 statusCode = response.statusCode,
                 message = "响应缺少 access_token",
                 body = response.body,
@@ -67,7 +67,7 @@ internal class QqBotOpenApiClient(
         }
         if (expiresInSeconds <= 0) {
             throw QqBotOpenApiException(
-                action = "获取 QQ 官方机器人 access token",
+                action = "获取 QQ 官方机器人访问令牌",
                 statusCode = response.statusCode,
                 message = "expires_in 无效：$expiresInSeconds",
                 body = response.body,
@@ -320,6 +320,6 @@ internal class JavaNetQqBotHttpTransport(
 
 internal fun qqBotAuthorization(accessToken: String): String {
     val token = accessToken.trim()
-    require(token.isNotBlank()) { "QQ 官方机器人 access token 不能为空" }
+    require(token.isNotBlank()) { "QQ 官方机器人访问令牌不能为空" }
     return "QQBot $token"
 }

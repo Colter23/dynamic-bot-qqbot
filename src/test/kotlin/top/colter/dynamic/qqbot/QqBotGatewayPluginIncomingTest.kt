@@ -22,7 +22,7 @@ import top.colter.dynamic.core.plugin.IncomingMessagePublisher
 
 class QqBotGatewayPluginIncomingTest {
     @Test
-    fun `incoming event should publish asynchronously`() = runBlocking {
+    fun `入站事件应异步发布`() = runBlocking {
         val plugin = QqBotGatewayPlugin()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val publishStarted = CompletableDeferred<Unit>()
@@ -56,7 +56,7 @@ class QqBotGatewayPluginIncomingTest {
     }
 
     @Test
-    fun `incoming event should be ignored when auto publish is disabled`() = runBlocking {
+    fun `关闭自动发布时忽略入站事件`() = runBlocking {
         val plugin = QqBotGatewayPlugin()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val published = CompletableDeferred<IncomingMessage>()
@@ -79,7 +79,7 @@ class QqBotGatewayPluginIncomingTest {
     }
 
     @Test
-    fun `incoming event should publish command request`() = runBlocking {
+    fun `入站事件应发布命令请求`() = runBlocking {
         val plugin = QqBotGatewayPlugin()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val publishedIncoming = CompletableDeferred<IncomingMessage>()
@@ -115,7 +115,7 @@ class QqBotGatewayPluginIncomingTest {
     }
 
     @Test
-    fun `blank incoming text should not publish command request`() = runBlocking {
+    fun `空白入站文本不发布命令请求`() = runBlocking {
         val plugin = QqBotGatewayPlugin()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val publishedIncoming = CompletableDeferred<IncomingMessage>()
@@ -140,7 +140,7 @@ class QqBotGatewayPluginIncomingTest {
     }
 
     @Test
-    fun `unsupported incoming event should be ignored`() = runBlocking {
+    fun `不支持的入站事件会被忽略`() = runBlocking {
         val plugin = QqBotGatewayPlugin()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val published = CompletableDeferred<IncomingMessage>()

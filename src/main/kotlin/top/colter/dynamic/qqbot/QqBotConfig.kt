@@ -68,7 +68,7 @@ public object QqBotConfigForm {
                 label = "AppSecret",
                 type = ConfigFieldType.SECRET,
                 section = "连接",
-                description = "QQ 开放平台分配的机器人密钥，用于获取 access token。",
+                description = "QQ 开放平台分配的机器人密钥，用于获取访问令牌。",
                 secret = true,
                 restartRequired = true,
                 restartTarget = "QQ 官方机器人插件",

@@ -9,7 +9,7 @@ import top.colter.dynamic.core.data.TargetKind
 
 class QqBotIncomingMessageMapperTest {
     @Test
-    fun `c2c message maps to user incoming message`() {
+    fun `单聊消息映射为用户入站消息`() {
         val incoming = QqBotIncomingMessageMapper.toIncomingMessage(
             QqBotIncomingEvent(
                 type = QQBOT_C2C_MESSAGE_CREATE,
@@ -45,7 +45,7 @@ class QqBotIncomingMessageMapperTest {
     }
 
     @Test
-    fun `group at message maps to group incoming message with attachments`() {
+    fun `群 at 消息带附件映射为群入站消息`() {
         val incoming = QqBotIncomingMessageMapper.toIncomingMessage(
             QqBotIncomingEvent(
                 type = QQBOT_GROUP_AT_MESSAGE_CREATE,
@@ -88,7 +88,7 @@ class QqBotIncomingMessageMapperTest {
     }
 
     @Test
-    fun `unsupported event returns null`() {
+    fun `不支持的事件返回 null`() {
         val incoming = QqBotIncomingMessageMapper.toIncomingMessage(
             QqBotIncomingEvent(
                 type = "GROUP_ADD_ROBOT",

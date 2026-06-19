@@ -8,7 +8,7 @@ import kotlin.test.assertEquals
 
 class PluginBoundaryTest {
     @Test
-    fun `plugin sources should not import runtime or storage implementations`() {
+    fun `插件源码不应导入运行时或存储实现`() {
         val roots = listOf(Path.of("src/main/kotlin"), Path.of("src/test/kotlin"))
         val forbiddenImports = listOf(
             "top.colter.dynamic.core." + "repository",

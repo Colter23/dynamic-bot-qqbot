@@ -20,7 +20,7 @@ import top.colter.dynamic.core.plugin.MessageSinkRouteState
 
 class QqBotGatewayPluginSendTest {
     @Test
-    fun `sendMessage sends user text and returns receipt`() = runBlocking {
+    fun `sendMessage 发送单聊文本并返回回执`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway()
         plugin.setPrivate("gateway", gateway)
@@ -40,7 +40,7 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
-    fun `sendCommandResult sends group text and returns receipt`() = runBlocking {
+    fun `sendCommandResult 发送群聊文本并返回回执`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway()
         plugin.setPrivate("gateway", gateway)
@@ -61,7 +61,7 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
-    fun `sendCommandResult uses trace reply context as official passive reply id`() = runBlocking {
+    fun `sendCommandResult 使用 trace 回复上下文作为官方被动回复 id`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway()
         val replyContexts = QqBotReplyContextStore(nowMillis = { 1_000L })
@@ -94,7 +94,7 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
-    fun `sendMessage rejects unavailable account without sending`() = runBlocking {
+    fun `sendMessage 拒绝不可用账号且不发送`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway(state = MessageSinkRouteState.UNAVAILABLE)
         plugin.setPrivate("gateway", gateway)

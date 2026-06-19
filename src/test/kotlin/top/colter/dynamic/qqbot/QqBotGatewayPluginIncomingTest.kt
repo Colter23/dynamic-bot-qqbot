@@ -19,6 +19,7 @@ import top.colter.dynamic.core.command.CommandPublisher
 import top.colter.dynamic.core.data.IncomingMessage
 import top.colter.dynamic.core.data.TargetKind
 import top.colter.dynamic.core.plugin.IncomingMessagePublisher
+import top.colter.dynamic.core.plugin.MessageSinkRouteState
 
 class QqBotGatewayPluginIncomingTest {
     @Test
@@ -72,6 +73,77 @@ class QqBotGatewayPluginIncomingTest {
             plugin.invokeIncoming(c2cEvent())
 
             assertNull(withTimeoutOrNull(200) { published.await() })
+        } finally {
+            plugin.callPrivate("stopIncomingScope")
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `调试回显命中文本时发送官方被动回复`() = runBlocking {
+        val plugin = QqBotGatewayPlugin()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val published = CompletableDeferred<IncomingMessage>()
+        val gateway = FakeGateway()
+        plugin.prepareIncomingTest(
+            scope = scope,
+            publishIncoming = { message -> published.complete(message) },
+        )
+
+        try {
+            plugin.setPrivate("running", true)
+            plugin.setPrivate(
+                "config",
+                QqBotConfig(
+                    autoPublishIncoming = false,
+                    debugEchoText = "ping",
+                    debugEchoReply = "pong",
+                ),
+            )
+            plugin.setPrivate("gateway", gateway)
+
+            plugin.invokeIncoming(c2cEvent(content = "ping"))
+
+            val call = withTimeout(500) { gateway.userSend.await() }
+            assertEquals("bot-app-id", call.accountId)
+            assertEquals("user-openid", call.targetId)
+            assertEquals("pong", call.request.content)
+            assertEquals("msg-1", call.request.replyToMessageId)
+            assertNull(withTimeoutOrNull(200) { published.await() })
+        } finally {
+            plugin.callPrivate("stopIncomingScope")
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `调试回显支持群聊事件`() = runBlocking {
+        val plugin = QqBotGatewayPlugin()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val gateway = FakeGateway()
+        plugin.prepareIncomingTest(
+            scope = scope,
+            publishIncoming = {},
+        )
+
+        try {
+            plugin.setPrivate("running", true)
+            plugin.setPrivate(
+                "config",
+                QqBotConfig(
+                    debugEchoText = "@bot ping",
+                    debugEchoReply = "pong",
+                ),
+            )
+            plugin.setPrivate("gateway", gateway)
+
+            plugin.invokeIncoming(groupEvent())
+
+            val call = withTimeout(500) { gateway.groupSend.await() }
+            assertEquals("bot-app-id", call.accountId)
+            assertEquals("group-openid", call.targetId)
+            assertEquals("pong", call.request.content)
+            assertEquals("group-msg-1", call.request.replyToMessageId)
         } finally {
             plugin.callPrivate("stopIncomingScope")
             scope.cancel()
@@ -177,6 +249,71 @@ class QqBotGatewayPluginIncomingTest {
         setPrivate("incomingMessagePublisher", IncomingMessagePublisher { message -> publishIncoming(message) })
         setPrivate("commandPublisher", CommandPublisher { request -> publishCommand(request) })
         callPrivate("startIncomingScope")
+    }
+
+    private data class SendCall(
+        val accountId: String,
+        val targetId: String,
+        val request: QqBotSendRequest,
+    )
+
+    private class FakeGateway : QqBotGateway {
+        val userSend: CompletableDeferred<SendCall> = CompletableDeferred()
+        val groupSend: CompletableDeferred<SendCall> = CompletableDeferred()
+
+        override suspend fun connect(onIncomingEvent: (QqBotIncomingEvent) -> Unit) {
+        }
+
+        override suspend fun availableAccounts(): List<QqBotRuntimeAccount> {
+            return listOf(QqBotRuntimeAccount("bot-app-id", state = MessageSinkRouteState.READY))
+        }
+
+        override suspend fun sendUserMessage(
+            accountId: String,
+            openid: String,
+            request: QqBotSendRequest,
+        ): QqBotSendReceipt {
+            userSend.complete(SendCall(accountId, openid, request))
+            return QqBotSendReceipt("user-send-1")
+        }
+
+        override suspend fun sendGroupMessage(
+            accountId: String,
+            groupOpenid: String,
+            request: QqBotSendRequest,
+        ): QqBotSendReceipt {
+            groupSend.complete(SendCall(accountId, groupOpenid, request))
+            return QqBotSendReceipt("group-send-1")
+        }
+
+        override suspend fun sendUserMediaMessage(
+            accountId: String,
+            openid: String,
+            media: QqBotMediaResourceSource,
+            request: QqBotSendRequest,
+        ): QqBotSendReceipt = unsupported()
+
+        override suspend fun sendGroupMediaMessage(
+            accountId: String,
+            groupOpenid: String,
+            media: QqBotMediaResourceSource,
+            request: QqBotSendRequest,
+        ): QqBotSendReceipt = unsupported()
+
+        override suspend fun recallUserMessage(accountId: String, openid: String, messageId: String) {
+            unsupported<Unit>()
+        }
+
+        override suspend fun recallGroupMessage(accountId: String, groupOpenid: String, messageId: String) {
+            unsupported<Unit>()
+        }
+
+        override fun close() {
+        }
+
+        private fun <T> unsupported(): T {
+            throw UnsupportedOperationException("测试网关未实现该操作")
+        }
     }
 
     private fun c2cEvent(content: String = "hello"): QqBotIncomingEvent {

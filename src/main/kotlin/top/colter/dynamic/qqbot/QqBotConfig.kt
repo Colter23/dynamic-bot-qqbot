@@ -13,6 +13,9 @@ public data class QqBotConfig(
     val intents: List<String> = listOf(QqBotIntent.GROUP_AND_C2C_EVENT.name),
     val reconnect: Boolean = true,
     val autoPublishIncoming: Boolean = true,
+    val debugLogPayloads: Boolean = false,
+    val debugEchoText: String = "",
+    val debugEchoReply: String = "QQ 官方机器人 WebSocket 连通性正常",
 )
 
 public enum class QqBotIntent(public val bit: Int) {
@@ -117,6 +120,30 @@ public object QqBotConfigForm {
                 restartRequired = true,
                 restartTarget = "QQ 官方机器人插件",
             ),
+            ConfigFieldSpec(
+                path = "debugLogPayloads",
+                label = "记录原始事件包",
+                type = ConfigFieldType.BOOLEAN,
+                section = "调试",
+                description = "开启后会在日志中记录收到的 WebSocket 原始载荷片段，排查连通性时临时使用。",
+                restartRequired = false,
+            ),
+            ConfigFieldSpec(
+                path = "debugEchoText",
+                label = "调试回显触发文本",
+                type = ConfigFieldType.TEXT,
+                section = "调试",
+                description = "填写后，当单聊或群聊收到完全相同的文本时，会直接回复调试回显内容；留空表示关闭。",
+                restartRequired = false,
+            ),
+            ConfigFieldSpec(
+                path = "debugEchoReply",
+                label = "调试回显回复内容",
+                type = ConfigFieldType.TEXT,
+                section = "调试",
+                description = "触发调试回显时发送的文本。",
+                restartRequired = false,
+            ),
         ),
     )
 
@@ -129,6 +156,7 @@ public object QqBotConfigForm {
         config.intents.forEach { intent ->
             require(intent.isNotBlank()) { "QQ 官方机器人事件订阅不能为空" }
         }
+        require(config.debugEchoReply.isNotBlank()) { "QQ 官方机器人调试回显回复内容不能为空" }
         config.normalizedIntents()
     }
 }

@@ -88,9 +88,9 @@ internal object QqBotWebSocketProtocol {
                         put(
                             "properties",
                             buildJsonObject {
-                                put("os", JsonPrimitive(systemProperty("os.name")))
-                                put("browser", JsonPrimitive("dynamic-bot"))
-                                put("device", JsonPrimitive("dynamic-bot"))
+                                put("\$os", JsonPrimitive(systemProperty("os.name")))
+                                put("\$browser", JsonPrimitive("dynamic-bot"))
+                                put("\$device", JsonPrimitive("dynamic-bot"))
                             },
                         )
                     },

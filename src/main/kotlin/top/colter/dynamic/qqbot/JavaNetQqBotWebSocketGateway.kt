@@ -28,6 +28,8 @@ internal class JavaNetQqBotWebSocketGateway(
     @Volatile
     private var webSocket: QqBotWebSocketSession? = null
 
+    private val pendingGatewayTexts: MutableList<String> = mutableListOf()
+
     @Volatile
     private var heartbeatTask: AutoCloseable? = null
 
@@ -74,6 +76,9 @@ internal class JavaNetQqBotWebSocketGateway(
         latestSequence = null
         sessionId = null
         account = initialAccount(MessageSinkRouteState.UNAVAILABLE)
+        synchronized(lifecycleLock) {
+            pendingGatewayTexts.clear()
+        }
 
         withContext(Dispatchers.IO) {
             openConnection()
@@ -152,6 +157,7 @@ internal class JavaNetQqBotWebSocketGateway(
         reconnecting = false
         val session = synchronized(lifecycleLock) {
             connectionGeneration += 1
+            pendingGatewayTexts.clear()
             val current = webSocket
             webSocket = null
             current
@@ -171,13 +177,18 @@ internal class JavaNetQqBotWebSocketGateway(
             url = endpoint.url,
             listener = GatewayListener(generation),
         )
+        val pendingTexts = mutableListOf<String>()
         synchronized(lifecycleLock) {
             if (closing || generation != connectionGeneration) {
+                pendingGatewayTexts.clear()
                 session.close(1000, "过期连接")
             } else {
                 webSocket = session
+                pendingTexts += pendingGatewayTexts
+                pendingGatewayTexts.clear()
             }
         }
+        pendingTexts.forEach(session::sendText)
         return generation
     }
 
@@ -195,6 +206,7 @@ internal class JavaNetQqBotWebSocketGateway(
             if (generation != connectionGeneration) return@synchronized null
             connectionGeneration += 1
             heartbeatTask.closeAndClear { heartbeatTask = null }
+            pendingGatewayTexts.clear()
             val session = webSocket
             webSocket = null
             session
@@ -223,6 +235,7 @@ internal class JavaNetQqBotWebSocketGateway(
         return synchronized(lifecycleLock) {
             connectionGeneration += 1
             heartbeatTask.closeAndClear { heartbeatTask = null }
+            pendingGatewayTexts.clear()
             val session = webSocket
             webSocket = null
             session
@@ -260,9 +273,11 @@ internal class JavaNetQqBotWebSocketGateway(
             ?: return
 
         frame.sequence?.let { latestSequence = it }
+        logFrame(frame, payload)
 
         when (frame.opcode) {
             QqBotOpcode.HELLO -> handleHello(payload)
+            QqBotOpcode.HEARTBEAT -> sendHeartbeat("QQ 官方机器人网关要求立即心跳")
             QqBotOpcode.DISPATCH -> handleDispatch(payload)
             QqBotOpcode.HEARTBEAT_ACK -> logger.debug { "QQ 官方机器人心跳已确认" }
             QqBotOpcode.RECONNECT -> handleReconnectRequest()
@@ -294,6 +309,7 @@ internal class JavaNetQqBotWebSocketGateway(
             rawPayload = dispatch.rawPayload,
             botAccountId = config.appId.trim().takeIf { it.isNotBlank() },
         )
+        logger.info { "收到 QQ 官方机器人 Dispatch 事件：type=${event.type} seq=${dispatch.sequence ?: "-"}" }
         incomingEventHandler?.invoke(event)
     }
 
@@ -341,9 +357,14 @@ internal class JavaNetQqBotWebSocketGateway(
             initialDelayMillis = intervalMillis,
             intervalMillis = intervalMillis,
         ) {
-            val payload = QqBotWebSocketProtocol.heartbeatPayload(latestSequence)
-            webSocket?.sendText(payload)
+            sendHeartbeat("定时心跳")
         }
+    }
+
+    private fun sendHeartbeat(reason: String) {
+        val payload = QqBotWebSocketProtocol.heartbeatPayload(latestSequence)
+        sendGatewayText(payload)
+        logger.debug { "QQ 官方机器人心跳已发送：reason=$reason seq=${latestSequence ?: "-"}" }
     }
 
     private fun sendIdentify() {
@@ -351,7 +372,8 @@ internal class JavaNetQqBotWebSocketGateway(
             accessToken = accessToken,
             intentMask = config.enabledIntentMask(),
         )
-        webSocket?.sendText(payload)
+        sendGatewayText(payload)
+        logger.info { "QQ 官方机器人 Identify 已发送：intents=${config.enabledIntentMask()}" }
     }
 
     private fun sendResumeOrIdentify() {
@@ -363,12 +385,23 @@ internal class JavaNetQqBotWebSocketGateway(
                 sessionId = currentSessionId,
                 sequence = sequence,
             )
-            webSocket?.sendText(payload)
+            sendGatewayText(payload)
             logger.info { "QQ 官方机器人正在恢复 WebSocket 会话：sessionId=$currentSessionId seq=$sequence" }
             return
         }
 
         sendIdentify()
+    }
+
+    private fun sendGatewayText(payload: String) {
+        val session = synchronized(lifecycleLock) {
+            val current = webSocket
+            if (current == null && !closing) {
+                pendingGatewayTexts += payload
+            }
+            current
+        }
+        session?.sendText(payload)
     }
 
     private fun markReady() {
@@ -416,6 +449,17 @@ internal class JavaNetQqBotWebSocketGateway(
         )
     }
 
+    private fun logFrame(frame: QqBotWebSocketFrame, payload: String) {
+        if (frame.opcode == QqBotOpcode.DISPATCH || frame.opcode == QqBotOpcode.INVALID_SESSION) {
+            logger.info {
+                "收到 QQ 官方机器人 WebSocket 帧：op=${frame.opcode.code} type=${frame.type.orEmpty().ifBlank { "-" }} seq=${frame.sequence ?: "-"}"
+            }
+        }
+        if (config.debugLogPayloads) {
+            logger.info { "QQ 官方机器人 WebSocket 原始载荷：${payload.take(MAX_DEBUG_PAYLOAD_CHARS)}" }
+        }
+    }
+
     private inner class GatewayListener(
         private val generation: Long,
     ) : QqBotWebSocketListener {
@@ -444,6 +488,8 @@ internal class JavaNetQqBotWebSocketGateway(
         }
     }
 }
+
+private const val MAX_DEBUG_PAYLOAD_CHARS: Int = 2_000
 
 internal interface QqBotWebSocketConnector {
     fun connect(url: String, listener: QqBotWebSocketListener): QqBotWebSocketSession

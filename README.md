@@ -53,4 +53,16 @@ reconnect: true
 autoPublishIncoming: true
 ```
 
+## 连通性调试
+
+如果机器人已启动但没有回复，可以先临时打开原始载荷日志和调试回显：
+
+```yaml
+debugLogPayloads: true
+debugEchoText: "ping"
+debugEchoReply: "QQ 官方机器人 WebSocket 连通性正常"
+```
+
+然后在单聊发送 `ping`，或在群聊中按实际收到的文本配置触发内容。日志中应至少能看到 WebSocket 打开、Hello、Identify、READY、Dispatch、入站消息解析；如果能收到入站消息但回显失败，继续看 OpenAPI 发送失败日志。排查完成后建议关闭 `debugLogPayloads`，避免日志中长期记录原始消息载荷。
+
 频道相关能力暂不作为本插件初始目标。

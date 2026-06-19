@@ -52,6 +52,20 @@ class JavaNetQqBotWebSocketGatewayTest {
     }
 
     @Test
+    fun `连接过程中收到 Hello 也会补发 Identify`() = runTest {
+        val connector = FakeQqBotWebSocketConnector(
+            initialTexts = listOf("""{"op":10,"d":{"heartbeat_interval":45000}}"""),
+        )
+        val gateway = testGateway(connector = connector)
+
+        gateway.connect { }
+
+        val identifyRoot = Json.parseToJsonElement(connector.session.sentTexts.single()).jsonObject
+
+        assertEquals(QqBotOpcode.IDENTIFY.code, identifyRoot.getValue("op").jsonPrimitive.int)
+    }
+
+    @Test
     fun `READY 事件记录会话并标记账号就绪`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val gateway = testGateway(connector = connector)
@@ -80,6 +94,22 @@ class JavaNetQqBotWebSocketGatewayTest {
 
         assertEquals(QqBotOpcode.HEARTBEAT.code, heartbeatRoot.getValue("op").jsonPrimitive.int)
         assertEquals(123, heartbeatRoot.getValue("d").jsonPrimitive.int)
+    }
+
+    @Test
+    fun `收到网关心跳请求时立即回应最新序号`() = runTest {
+        val connector = FakeQqBotWebSocketConnector()
+        val gateway = testGateway(connector = connector)
+
+        gateway.connect { }
+        connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        connector.listener.onText("""{"op":0,"s":88,"t":"READY","d":{"session_id":"session-a"}}""")
+        connector.listener.onText("""{"op":1,"d":null}""")
+
+        val heartbeatRoot = Json.parseToJsonElement(connector.session.sentTexts.last()).jsonObject
+
+        assertEquals(QqBotOpcode.HEARTBEAT.code, heartbeatRoot.getValue("op").jsonPrimitive.int)
+        assertEquals(88, heartbeatRoot.getValue("d").jsonPrimitive.int)
     }
 
     @Test
@@ -443,7 +473,9 @@ class JavaNetQqBotWebSocketGatewayTest {
         )
     }
 
-    private class FakeQqBotWebSocketConnector : QqBotWebSocketConnector {
+    private class FakeQqBotWebSocketConnector(
+        private val initialTexts: List<String> = emptyList(),
+    ) : QqBotWebSocketConnector {
         val sessions: MutableList<FakeQqBotWebSocketSession> = mutableListOf()
         val listeners: MutableList<QqBotWebSocketListener> = mutableListOf()
         val connectedUrls: MutableList<String> = mutableListOf()
@@ -460,6 +492,7 @@ class JavaNetQqBotWebSocketGatewayTest {
             listeners += listener
             connectedUrls += url
             listener.onOpen()
+            initialTexts.forEach(listener::onText)
             return session
         }
     }

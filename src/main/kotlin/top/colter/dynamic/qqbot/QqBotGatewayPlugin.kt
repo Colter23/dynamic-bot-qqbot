@@ -10,6 +10,9 @@ import top.colter.dynamic.core.command.CommandPublisher
 import top.colter.dynamic.core.config.ConfigApplyResult
 import top.colter.dynamic.core.config.ConfigurablePlugin
 import top.colter.dynamic.core.config.loadOrCreate
+import top.colter.dynamic.core.data.IncomingMessage
+import top.colter.dynamic.core.data.MessageBatch
+import top.colter.dynamic.core.data.MessageContent
 import top.colter.dynamic.core.data.PlatformId
 import top.colter.dynamic.core.data.TargetAddress
 import top.colter.dynamic.core.data.TargetKind
@@ -341,18 +344,28 @@ public class QqBotGatewayPlugin :
     }
 
     internal fun onIncomingEvent(event: QqBotIncomingEvent) {
-        if (!running || !config.autoPublishIncoming) return
+        if (!running) return
+        logger.info { "QQ 官方机器人收到入站事件：type=${event.type} account=${event.botAccountId.orEmpty().ifBlank { "-" }}" }
+        if (config.debugLogPayloads) {
+            logger.info { "QQ 官方机器人入站事件原始载荷：${event.rawPayload.take(MAX_DEBUG_PAYLOAD_CHARS)}" }
+        }
         val incoming = QqBotIncomingMessageMapper.toIncomingMessage(event)
         if (incoming == null) {
             logger.debug { "忽略 QQ 官方机器人入站事件：type=${event.type}" }
             return
         }
+        logger.info {
+            "QQ 官方机器人入站消息已解析：messageId=${incoming.messageId.ifBlank { "-" }} target=${incoming.target.kind}:${incoming.target.externalId} sender=${incoming.senderId} text=${incoming.text.take(MAX_DEBUG_TEXT_CHARS)}"
+        }
+
+        val scope = incomingScope ?: return
+        maybeSendDebugEcho(incoming, scope)
+        if (!config.autoPublishIncoming) return
 
         val commandRequest = QqBotCommandMapper.toCommandRequest(
             sourcePlugin = pluginId,
             incoming = incoming,
         )
-        val scope = incomingScope ?: return
         if (commandRequest != null) {
             replyContextStore.remember(commandRequest.traceId, incoming)
         }
@@ -374,6 +387,35 @@ public class QqBotGatewayPlugin :
                 } catch (error: Throwable) {
                     logger.warn(error) { "QQ 官方机器人命令发布失败：traceId=${commandRequest.traceId}" }
                 }
+            }
+        }
+    }
+
+    private fun maybeSendDebugEcho(incoming: IncomingMessage, scope: CoroutineScope) {
+        val trigger = config.debugEchoText.trim().takeIf { it.isNotBlank() } ?: return
+        if (incoming.text.trim() != trigger) return
+        val reply = config.debugEchoReply.trim().ifBlank { "QQ 官方机器人 WebSocket 连通性正常" }
+        val accountId = incoming.botAccountId?.trim()?.takeIf { it.isNotBlank() }
+            ?: config.appId.trim().takeIf { it.isNotBlank() }
+            ?: return
+        logger.info { "QQ 官方机器人调试回显已触发：messageId=${incoming.messageId.ifBlank { "-" }}" }
+        scope.launch {
+            if (!running) return@launch
+            runCatching {
+                val request = QqBotMessageMapper.toTextRequest(
+                    batches = listOf(MessageBatch(listOf(MessageContent.Text(reply)))),
+                    replyToMessageId = incoming.messageId,
+                )
+                when (val target = QqBotTarget.fromAddress(incoming.target)) {
+                    is QqBotTarget.User -> gateway.sendUserMessage(accountId, target.openid, request)
+                    is QqBotTarget.Group -> gateway.sendGroupMessage(accountId, target.groupOpenid, request)
+                    is QqBotTarget.Unsupported -> error(target.reason)
+                }
+            }.onSuccess { receipt ->
+                logger.info { "QQ 官方机器人调试回显发送成功：messageId=${receipt.messageId}" }
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                logger.warn(error) { "QQ 官方机器人调试回显发送失败" }
             }
         }
     }
@@ -472,3 +514,6 @@ public class QqBotGatewayPlugin :
 internal fun createQqBotGateway(config: QqBotConfig): QqBotGateway {
     return JavaNetQqBotWebSocketGateway(config)
 }
+
+private const val MAX_DEBUG_PAYLOAD_CHARS: Int = 2_000
+private const val MAX_DEBUG_TEXT_CHARS: Int = 200

@@ -26,4 +26,11 @@ class QqBotConfigFormTest {
             ),
         )
     }
+
+    @Test
+    fun `调试回显回复内容不能为空`() {
+        assertFailsWith<IllegalArgumentException> {
+            QqBotConfigForm.validate(QqBotConfig(debugEchoReply = "   "))
+        }
+    }
 }

@@ -55,7 +55,9 @@ class QqBotWebSocketProtocolTest {
             listOf(0, 1),
             data.getValue("shard").jsonArray.map { it.jsonPrimitive.int },
         )
-        assertEquals("dynamic-bot", data.getValue("properties").jsonObject.getValue("browser").jsonPrimitive.content)
+        val properties = data.getValue("properties").jsonObject
+        assertEquals("dynamic-bot", properties.getValue("\$browser").jsonPrimitive.content)
+        assertEquals("dynamic-bot", properties.getValue("\$device").jsonPrimitive.content)
     }
 
     @Test

@@ -3,6 +3,7 @@ package top.colter.dynamic.qqbot
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
@@ -244,6 +245,59 @@ class QqBotOpenApiClientTest {
         assertEquals(1, body.getValue("file_type").jsonPrimitive.int)
         assertEquals("https://example.com/a.png", body.getValue("url").jsonPrimitive.content)
         assertEquals(false, body.getValue("srv_send_msg").jsonPrimitive.boolean)
+    }
+
+    @Test
+    fun `富媒体资源登记可以提交 base64 文件数据`() {
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}"""),
+                    QqBotHttpResponse(200, """{"file_info":"file-info-1"}"""),
+                ),
+            ),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        val resource = client.prepareGroupMedia(
+            groupOpenid = "group-openid",
+            request = QqBotMediaPrepareRequest(
+                fileType = QqBotMediaFileType.IMAGE,
+                fileDataBase64 = " aW1hZ2UtYnl0ZXM= ",
+            ),
+        )
+
+        assertEquals("file-info-1", resource.fileInfo)
+        val body = Json.parseToJsonElement(transport.posts.last().body).jsonObject
+        assertEquals(1, body.getValue("file_type").jsonPrimitive.int)
+        assertEquals("aW1hZ2UtYnl0ZXM=", body.getValue("file_data").jsonPrimitive.content)
+        assertEquals(null, body["url"]?.jsonPrimitive?.contentOrNull)
+        assertEquals(false, body.getValue("srv_send_msg").jsonPrimitive.boolean)
+    }
+
+    @Test
+    fun `富媒体资源登记拒绝空资源数据`() {
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
+            ),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        val error = assertFailsWith<IllegalArgumentException> {
+            client.prepareUserMedia(
+                openid = "user-openid",
+                request = QqBotMediaPrepareRequest(fileType = QqBotMediaFileType.IMAGE),
+            )
+        }
+
+        assertEquals("QQ 官方机器人富媒体资源 URL 或 file_data 不能同时为空", error.message)
     }
 
     @Test

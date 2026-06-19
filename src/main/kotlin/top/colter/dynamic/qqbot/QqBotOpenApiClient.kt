@@ -248,12 +248,20 @@ internal class QqBotOpenApiClient(
     }
 
     private fun encodeMediaPrepareRequest(request: QqBotMediaPrepareRequest): String {
-        val url = request.url.trim()
-        require(url.isNotBlank()) { "QQ 官方机器人富媒体资源 URL 不能为空" }
+        val url = request.url?.trim()?.takeIf { it.isNotBlank() }
+        val fileDataBase64 = request.fileDataBase64?.trim()?.takeIf { it.isNotBlank() }
+        require(url != null || fileDataBase64 != null) {
+            "QQ 官方机器人富媒体资源 URL 或 file_data 不能同时为空"
+        }
         return json.encodeToString(
             buildJsonObject {
                 put("file_type", JsonPrimitive(request.fileType.code))
-                put("url", JsonPrimitive(url))
+                if (url != null) {
+                    put("url", JsonPrimitive(url))
+                }
+                if (fileDataBase64 != null) {
+                    put("file_data", JsonPrimitive(fileDataBase64))
+                }
                 put("srv_send_msg", JsonPrimitive(request.srvSendMsg))
             },
         )
@@ -334,7 +342,8 @@ internal data class QqBotSessionStartLimit(
 
 internal data class QqBotMediaPrepareRequest(
     val fileType: QqBotMediaFileType,
-    val url: String,
+    val url: String? = null,
+    val fileDataBase64: String? = null,
     val srvSendMsg: Boolean = false,
 )
 

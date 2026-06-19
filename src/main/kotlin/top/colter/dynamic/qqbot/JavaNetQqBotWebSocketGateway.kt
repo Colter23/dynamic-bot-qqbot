@@ -21,40 +21,58 @@ internal class JavaNetQqBotWebSocketGateway(
     private val openApiClient: QqBotOpenApiClient = QqBotOpenApiClient(config),
     private val connector: QqBotWebSocketConnector = JavaNetQqBotWebSocketConnector(),
     private val heartbeatScheduler: QqBotHeartbeatScheduler = ExecutorQqBotHeartbeatScheduler(),
+    private val reconnectScheduler: QqBotReconnectScheduler = ExecutorQqBotReconnectScheduler(),
 ) : QqBotGateway {
+    private val lifecycleLock = Any()
+
     @Volatile
     private var webSocket: QqBotWebSocketSession? = null
+
     @Volatile
     private var heartbeatTask: AutoCloseable? = null
+
+    @Volatile
+    private var reconnectTask: AutoCloseable? = null
+
     @Volatile
     private var incomingEventHandler: ((QqBotIncomingEvent) -> Unit)? = null
+
     @Volatile
     private var account: QqBotRuntimeAccount? = null
+
     @Volatile
     private var latestSequence: Long? = null
+
     @Volatile
     private var accessToken: String = ""
+
     @Volatile
     private var closing: Boolean = false
 
+    @Volatile
+    private var reconnecting: Boolean = false
+
+    @Volatile
+    private var reconnectAttempts: Int = 0
+
+    @Volatile
+    private var connectionGeneration: Long = 0L
+
     override suspend fun connect(onIncomingEvent: (QqBotIncomingEvent) -> Unit) {
-        if (webSocket != null) return
+        synchronized(lifecycleLock) {
+            if (webSocket != null) return
+        }
 
         QqBotConfigForm.validate(config)
         incomingEventHandler = onIncomingEvent
         closing = false
+        reconnecting = false
+        reconnectAttempts = 0
+        latestSequence = null
         account = initialAccount(MessageSinkRouteState.UNAVAILABLE)
 
         withContext(Dispatchers.IO) {
-            val endpoint = openApiClient.gatewayBotEndpoint()
-            accessToken = openApiClient.accessToken().value
-            logger.info {
-                "准备连接 QQ 官方机器人 WebSocket：appId=${config.appId}，url=${endpoint.url}，shards=${endpoint.shards ?: "-"}"
-            }
-            webSocket = connector.connect(
-                url = endpoint.url,
-                listener = GatewayListener(),
-            )
+            openConnection()
         }
     }
 
@@ -91,19 +109,115 @@ internal class JavaNetQqBotWebSocketGateway(
     override fun close() {
         closing = true
         incomingEventHandler = null
-        heartbeatTask?.closeQuietly()
-        heartbeatTask = null
-        val session = webSocket
-        webSocket = null
+        heartbeatTask.closeAndClear { heartbeatTask = null }
+        reconnectTask.closeAndClear { reconnectTask = null }
+        reconnecting = false
+        val session = synchronized(lifecycleLock) {
+            connectionGeneration += 1
+            val current = webSocket
+            webSocket = null
+            current
+        }
         session?.close(1000, "shutdown")
-        markUnavailable("QQ 官方机器人 WebSocket 已关闭")
+        markUnavailable("QQ official bot WebSocket closed")
+    }
+
+    private fun openConnection(): Long {
+        val endpoint = openApiClient.gatewayBotEndpoint()
+        accessToken = openApiClient.accessToken().value
+        val generation = nextConnectionGeneration()
+        logger.info {
+            "Connecting QQ official bot WebSocket: appId=${config.appId} url=${endpoint.url} shards=${endpoint.shards ?: "-"}"
+        }
+        val session = connector.connect(
+            url = endpoint.url,
+            listener = GatewayListener(generation),
+        )
+        synchronized(lifecycleLock) {
+            if (closing || generation != connectionGeneration) {
+                session.close(1000, "stale connection")
+            } else {
+                webSocket = session
+            }
+        }
+        return generation
+    }
+
+    private fun nextConnectionGeneration(): Long = synchronized(lifecycleLock) {
+        connectionGeneration += 1
+        connectionGeneration
+    }
+
+    private fun isCurrentConnection(generation: Long): Boolean {
+        return !closing && generation == connectionGeneration
+    }
+
+    private fun clearTransport(generation: Long): QqBotWebSocketSession? {
+        return synchronized(lifecycleLock) {
+            if (generation != connectionGeneration) return@synchronized null
+            connectionGeneration += 1
+            heartbeatTask.closeAndClear { heartbeatTask = null }
+            val session = webSocket
+            webSocket = null
+            session
+        }
+    }
+
+    private fun scheduleReconnect(reason: String, closeCurrentSession: Boolean) {
+        if (closing || !config.reconnect) return
+
+        val session = if (closeCurrentSession) invalidateCurrentConnection() else null
+        session?.close(4000, "reconnect")
+
+        val delayMillis = synchronized(lifecycleLock) {
+            if (closing || reconnecting) return
+            reconnecting = true
+            reconnectAttempts += 1
+            reconnectDelayMillis(reconnectAttempts)
+        }
+        logger.warn { "$reason; reconnecting in ${delayMillis}ms" }
+        reconnectTask = reconnectScheduler.schedule(delayMillis) {
+            runReconnectAttempt()
+        }
+    }
+
+    private fun invalidateCurrentConnection(): QqBotWebSocketSession? {
+        return synchronized(lifecycleLock) {
+            connectionGeneration += 1
+            heartbeatTask.closeAndClear { heartbeatTask = null }
+            val session = webSocket
+            webSocket = null
+            session
+        }
+    }
+
+    private fun runReconnectAttempt() {
+        if (closing) return
+        runCatching {
+            openConnection()
+        }.onSuccess {
+            synchronized(lifecycleLock) {
+                reconnectTask = null
+                reconnecting = false
+            }
+        }.onFailure { error ->
+            synchronized(lifecycleLock) {
+                reconnectTask = null
+                reconnecting = false
+            }
+            markUnavailable(error.message?.takeIf { it.isNotBlank() } ?: "QQ official bot reconnect failed")
+            scheduleReconnect("QQ official bot reconnect failed", closeCurrentSession = false)
+        }
+    }
+
+    private fun reconnectDelayMillis(attempt: Int): Long {
+        val exponent = (attempt - 1).coerceIn(0, 5)
+        return 1_000L * (1L shl exponent)
     }
 
     private fun handleText(payload: String) {
         val frame = runCatching { QqBotWebSocketProtocol.parseFrame(payload) }
-            .onFailure { error ->
-                logger.warn(error) { "QQ 官方机器人 WebSocket 包解析失败" }
-            }
+            .onFailure { error -> logger.warn(error) { "QQ official bot WebSocket frame parse failed" } }
             .getOrNull()
             ?: return
 
@@ -112,23 +226,23 @@ internal class JavaNetQqBotWebSocketGateway(
         when (frame.opcode) {
             QqBotOpcode.HELLO -> handleHello(payload)
             QqBotOpcode.DISPATCH -> handleDispatch(payload)
-            QqBotOpcode.HEARTBEAT_ACK -> logger.debug { "QQ 官方机器人 WebSocket 心跳已确认" }
+            QqBotOpcode.HEARTBEAT_ACK -> logger.debug { "QQ official bot heartbeat acknowledged" }
             QqBotOpcode.RECONNECT -> handleReconnectRequest()
             QqBotOpcode.INVALID_SESSION -> handleInvalidSession()
-            else -> logger.debug { "忽略 QQ 官方机器人 WebSocket 包：op=${frame.opcode.code} type=${frame.type.orEmpty()}" }
+            else -> logger.debug { "Ignoring QQ official bot WebSocket frame: op=${frame.opcode.code} type=${frame.type.orEmpty()}" }
         }
     }
 
     private fun handleHello(payload: String) {
         val hello = runCatching { QqBotWebSocketProtocol.parseHello(payload) }
-            .onFailure { error -> logger.warn(error) { "QQ 官方机器人 Hello 包解析失败" } }
+            .onFailure { error -> logger.warn(error) { "QQ official bot Hello parse failed" } }
             .getOrNull()
             ?: return
 
         startHeartbeat(hello.heartbeatIntervalMillis)
         sendIdentify()
         markReady()
-        logger.info { "QQ 官方机器人 WebSocket Hello 已处理：heartbeat=${hello.heartbeatIntervalMillis}ms" }
+        logger.info { "QQ official bot WebSocket Hello handled: heartbeat=${hello.heartbeatIntervalMillis}ms" }
     }
 
     private fun handleDispatch(payload: String) {
@@ -140,17 +254,17 @@ internal class JavaNetQqBotWebSocketGateway(
     }
 
     private fun handleReconnectRequest() {
-        markUnavailable("QQ 官方机器人 WebSocket 收到 Reconnect 指令")
-        logger.warn { "QQ 官方机器人 WebSocket 收到 Reconnect 指令；自动重连将在后续版本补齐" }
+        markUnavailable("QQ official bot gateway requested reconnect")
+        scheduleReconnect("QQ official bot gateway requested reconnect", closeCurrentSession = true)
     }
 
     private fun handleInvalidSession() {
-        markUnavailable("QQ 官方机器人 WebSocket session 无效")
-        logger.warn { "QQ 官方机器人 WebSocket session 无效；请检查 token、intent 与分片配置" }
+        markUnavailable("QQ official bot session invalid")
+        scheduleReconnect("QQ official bot session invalid", closeCurrentSession = true)
     }
 
     private fun startHeartbeat(intervalMillis: Long) {
-        heartbeatTask?.closeQuietly()
+        heartbeatTask.closeAndClear { heartbeatTask = null }
         heartbeatTask = heartbeatScheduler.scheduleAtFixedRate(
             initialDelayMillis = intervalMillis,
             intervalMillis = intervalMillis,
@@ -169,6 +283,7 @@ internal class JavaNetQqBotWebSocketGateway(
     }
 
     private fun markReady() {
+        reconnectAttempts = 0
         account = initialAccount(MessageSinkRouteState.READY)
     }
 
@@ -184,45 +299,55 @@ internal class JavaNetQqBotWebSocketGateway(
         val appId = config.appId.trim()
         return QqBotRuntimeAccount(
             accountId = appId,
-            name = "QQ 官方机器人 $appId",
+            name = "QQ official bot $appId",
             state = state,
         )
     }
 
     private fun requireAccount(accountId: String) {
-        val current = account ?: error("QQ 官方机器人账号尚未初始化")
-        require(current.accountId == accountId) { "QQ 官方机器人账号不匹配：expected=${current.accountId} actual=$accountId" }
-        require(current.state == MessageSinkRouteState.READY) { "QQ 官方机器人账号不可用：$accountId" }
+        val current = account ?: error("QQ official bot account is not initialized")
+        require(current.accountId == accountId) {
+            "QQ official bot account mismatch: expected=${current.accountId} actual=$accountId"
+        }
+        require(current.state == MessageSinkRouteState.READY) { "QQ official bot account is unavailable: $accountId" }
     }
 
     private fun <T> notImplemented(): T {
-        throw UnsupportedOperationException("QQ 官方机器人 OpenAPI 消息撤回实现尚未接入")
+        throw UnsupportedOperationException("QQ official bot recall OpenAPI is not implemented yet")
     }
 
-    private fun AutoCloseable.closeQuietly() {
-        runCatching { close() }
-            .onFailure { error -> logger.debug(error) { "QQ 官方机器人心跳任务关闭失败" } }
+    private fun AutoCloseable?.closeAndClear(clear: () -> Unit) {
+        val closeable = this ?: return
+        runCatching { closeable.close() }
+            .onFailure { error -> logger.debug(error) { "QQ official bot closeable cleanup failed" } }
+        clear()
     }
 
-    private inner class GatewayListener : QqBotWebSocketListener {
+    private inner class GatewayListener(
+        private val generation: Long,
+    ) : QqBotWebSocketListener {
         override fun onOpen() {
-            logger.info { "QQ 官方机器人 WebSocket 已打开：appId=${config.appId}" }
+            if (!isCurrentConnection(generation)) return
+            logger.info { "QQ official bot WebSocket opened: appId=${config.appId}" }
         }
 
         override fun onText(payload: String) {
+            if (!isCurrentConnection(generation)) return
             handleText(payload)
         }
 
         override fun onClosed(statusCode: Int, reason: String) {
-            webSocket = null
-            heartbeatTask?.closeQuietly()
-            heartbeatTask = null
-            markUnavailable("QQ 官方机器人 WebSocket 已关闭：code=$statusCode，reason=$reason")
+            if (!isCurrentConnection(generation)) return
+            clearTransport(generation)
+            markUnavailable("QQ official bot WebSocket closed: code=$statusCode reason=$reason")
+            scheduleReconnect("QQ official bot WebSocket closed: code=$statusCode reason=$reason", closeCurrentSession = false)
         }
 
         override fun onError(error: Throwable) {
-            markUnavailable(error.message?.takeIf { it.isNotBlank() } ?: "QQ 官方机器人 WebSocket 发生错误")
-            logger.warn(error) { "QQ 官方机器人 WebSocket 发生错误" }
+            if (!isCurrentConnection(generation)) return
+            markUnavailable(error.message?.takeIf { it.isNotBlank() } ?: "QQ official bot WebSocket error")
+            logger.warn(error) { "QQ official bot WebSocket error" }
+            scheduleReconnect("QQ official bot WebSocket error", closeCurrentSession = true)
         }
     }
 }
@@ -323,9 +448,28 @@ internal class ExecutorQqBotHeartbeatScheduler(
         task: () -> Unit,
     ): AutoCloseable {
         val future = executor.scheduleAtFixedRate(
-            { runCatching(task).onFailure { error -> logger.warn(error) { "QQ 官方机器人心跳发送失败" } } },
+            { runCatching(task).onFailure { error -> logger.warn(error) { "QQ official bot heartbeat send failed" } } },
             initialDelayMillis,
             intervalMillis,
+            TimeUnit.MILLISECONDS,
+        )
+        return AutoCloseable { future.cancel(false) }
+    }
+}
+
+internal interface QqBotReconnectScheduler {
+    fun schedule(delayMillis: Long, task: () -> Unit): AutoCloseable
+}
+
+internal class ExecutorQqBotReconnectScheduler(
+    private val executor: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "qqbot-reconnect").apply { isDaemon = true }
+    },
+) : QqBotReconnectScheduler {
+    override fun schedule(delayMillis: Long, task: () -> Unit): AutoCloseable {
+        val future = executor.schedule(
+            { runCatching(task).onFailure { error -> logger.warn(error) { "QQ official bot reconnect task failed" } } },
+            delayMillis,
             TimeUnit.MILLISECONDS,
         )
         return AutoCloseable { future.cancel(false) }

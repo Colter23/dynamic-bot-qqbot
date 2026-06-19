@@ -8,7 +8,6 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertNotNull
 import top.colter.dynamic.core.plugin.MessageSinkRouteState
 
 class JavaNetQqBotWebSocketGatewayTest {
@@ -23,7 +22,7 @@ class JavaNetQqBotWebSocketGatewayTest {
         assertEquals(
             QqBotRuntimeAccount(
                 accountId = "app-id",
-                name = "QQ 官方机器人 app-id",
+                name = "QQ official bot app-id",
                 state = MessageSinkRouteState.UNAVAILABLE,
             ),
             gateway.availableAccounts().single(),
@@ -33,8 +32,8 @@ class JavaNetQqBotWebSocketGatewayTest {
     @Test
     fun `hello sends identify and schedules heartbeat`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
-        val scheduler = FakeQqBotHeartbeatScheduler()
-        val gateway = testGateway(connector = connector, scheduler = scheduler)
+        val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
+        val gateway = testGateway(connector = connector, heartbeatScheduler = heartbeatScheduler)
 
         gateway.connect { }
         connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
@@ -47,21 +46,21 @@ class JavaNetQqBotWebSocketGatewayTest {
         assertEquals("QQBot token-a", identifyData.getValue("token").jsonPrimitive.content)
         assertEquals(1 shl 25, identifyData.getValue("intents").jsonPrimitive.int)
         assertEquals(listOf(0, 1), identifyData.getValue("shard").jsonArray.map { it.jsonPrimitive.int })
-        assertEquals(45_000, scheduler.scheduled.single().initialDelayMillis)
-        assertEquals(45_000, scheduler.scheduled.single().intervalMillis)
+        assertEquals(45_000, heartbeatScheduler.scheduled.single().initialDelayMillis)
+        assertEquals(45_000, heartbeatScheduler.scheduled.single().intervalMillis)
         assertEquals(MessageSinkRouteState.READY, gateway.availableAccounts().single().state)
     }
 
     @Test
     fun `heartbeat uses latest dispatch sequence`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
-        val scheduler = FakeQqBotHeartbeatScheduler()
-        val gateway = testGateway(connector = connector, scheduler = scheduler)
+        val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
+        val gateway = testGateway(connector = connector, heartbeatScheduler = heartbeatScheduler)
 
         gateway.connect { }
         connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
         connector.listener.onText("""{"op":0,"s":123,"t":"C2C_MESSAGE_CREATE","d":{"id":"msg-1"}}""")
-        scheduler.scheduled.single().task()
+        heartbeatScheduler.scheduled.single().task()
 
         val heartbeatPayload = connector.session.sentTexts.last()
         val heartbeatRoot = Json.parseToJsonElement(heartbeatPayload).jsonObject
@@ -86,14 +85,14 @@ class JavaNetQqBotWebSocketGatewayTest {
     @Test
     fun `close cancels heartbeat and closes websocket`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
-        val scheduler = FakeQqBotHeartbeatScheduler()
-        val gateway = testGateway(connector = connector, scheduler = scheduler)
+        val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
+        val gateway = testGateway(connector = connector, heartbeatScheduler = heartbeatScheduler)
 
         gateway.connect { }
         connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
         gateway.close()
 
-        assertEquals(true, scheduler.scheduled.single().closed)
+        assertEquals(true, heartbeatScheduler.scheduled.single().closed)
         assertEquals(1000, connector.session.closedStatusCode)
         assertEquals("shutdown", connector.session.closedReason)
         assertEquals(MessageSinkRouteState.UNAVAILABLE, gateway.availableAccounts().single().state)
@@ -111,6 +110,93 @@ class JavaNetQqBotWebSocketGatewayTest {
         connector.listener.onClosed(4009, "expired")
 
         assertEquals(MessageSinkRouteState.UNAVAILABLE, gateway.availableAccounts().single().state)
+    }
+
+    @Test
+    fun `remote close schedules reconnect and opens a fresh websocket`() = runTest {
+        val connector = FakeQqBotWebSocketConnector()
+        val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
+        val reconnectScheduler = FakeQqBotReconnectScheduler()
+        val transport = reconnectTransport()
+        val gateway = testGateway(
+            connector = connector,
+            heartbeatScheduler = heartbeatScheduler,
+            reconnectScheduler = reconnectScheduler,
+            transport = transport,
+        )
+
+        gateway.connect { }
+        connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        connector.listener.onClosed(4009, "expired")
+
+        assertEquals(MessageSinkRouteState.UNAVAILABLE, gateway.availableAccounts().single().state)
+        assertEquals(true, heartbeatScheduler.scheduled.single().closed)
+        assertEquals(1_000L, reconnectScheduler.scheduled.single().delayMillis)
+
+        reconnectScheduler.scheduled.single().task()
+        connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":30000}}""")
+
+        assertEquals(
+            listOf("wss://api.sgroup.qq.com/websocket", "wss://api.sgroup.qq.com/websocket-reconnect"),
+            connector.connectedUrls,
+        )
+        assertEquals(2, connector.sessions.size)
+        assertEquals(MessageSinkRouteState.READY, gateway.availableAccounts().single().state)
+        assertEquals(30_000, heartbeatScheduler.scheduled.last().intervalMillis)
+        val identifyRoot = Json.parseToJsonElement(connector.session.sentTexts.single()).jsonObject
+        assertEquals(QqBotOpcode.IDENTIFY.code, identifyRoot.getValue("op").jsonPrimitive.int)
+    }
+
+    @Test
+    fun `gateway reconnect opcode closes current websocket and schedules reconnect`() = runTest {
+        val connector = FakeQqBotWebSocketConnector()
+        val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
+        val reconnectScheduler = FakeQqBotReconnectScheduler()
+        val gateway = testGateway(
+            connector = connector,
+            heartbeatScheduler = heartbeatScheduler,
+            reconnectScheduler = reconnectScheduler,
+        )
+
+        gateway.connect { }
+        connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        connector.listener.onText("""{"op":7,"d":null}""")
+
+        assertEquals(MessageSinkRouteState.UNAVAILABLE, gateway.availableAccounts().single().state)
+        assertEquals(true, heartbeatScheduler.scheduled.single().closed)
+        assertEquals(4000, connector.session.closedStatusCode)
+        assertEquals("reconnect", connector.session.closedReason)
+        assertEquals(1_000L, reconnectScheduler.scheduled.single().delayMillis)
+    }
+
+    @Test
+    fun `close cancels pending reconnect`() = runTest {
+        val connector = FakeQqBotWebSocketConnector()
+        val reconnectScheduler = FakeQqBotReconnectScheduler()
+        val gateway = testGateway(connector = connector, reconnectScheduler = reconnectScheduler)
+
+        gateway.connect { }
+        connector.listener.onClosed(4009, "expired")
+        gateway.close()
+
+        assertEquals(true, reconnectScheduler.scheduled.single().closed)
+    }
+
+    @Test
+    fun `remote close does not reconnect when disabled`() = runTest {
+        val connector = FakeQqBotWebSocketConnector()
+        val reconnectScheduler = FakeQqBotReconnectScheduler()
+        val gateway = testGateway(
+            connector = connector,
+            reconnectScheduler = reconnectScheduler,
+            reconnect = false,
+        )
+
+        gateway.connect { }
+        connector.listener.onClosed(4009, "expired")
+
+        assertEquals(MessageSinkRouteState.UNAVAILABLE, gateway.availableAccounts().single().state)
+        assertEquals(0, reconnectScheduler.scheduled.size)
     }
 
     @Test
@@ -152,37 +238,67 @@ class JavaNetQqBotWebSocketGatewayTest {
 
     private fun testGateway(
         connector: FakeQqBotWebSocketConnector = FakeQqBotWebSocketConnector(),
-        scheduler: FakeQqBotHeartbeatScheduler = FakeQqBotHeartbeatScheduler(),
-        transport: FakeQqBotHttpTransport = FakeQqBotHttpTransport(
+        heartbeatScheduler: FakeQqBotHeartbeatScheduler = FakeQqBotHeartbeatScheduler(),
+        reconnectScheduler: FakeQqBotReconnectScheduler = FakeQqBotReconnectScheduler(),
+        reconnect: Boolean = true,
+        transport: FakeQqBotHttpTransport = defaultTransport(),
+    ): JavaNetQqBotWebSocketGateway {
+        val config = QqBotConfig(
+            enabled = true,
+            appId = "app-id",
+            appSecret = "secret",
+            reconnect = reconnect,
+        )
+        return JavaNetQqBotWebSocketGateway(
+            config = config,
+            openApiClient = QqBotOpenApiClient(config = config, transport = transport),
+            connector = connector,
+            heartbeatScheduler = heartbeatScheduler,
+            reconnectScheduler = reconnectScheduler,
+        )
+    }
+
+    private fun defaultTransport(): FakeQqBotHttpTransport {
+        return FakeQqBotHttpTransport(
             postResponses = ArrayDeque(
                 listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
             ),
             getResponses = ArrayDeque(
                 listOf(QqBotHttpResponse(200, """{"url":"wss://api.sgroup.qq.com/websocket","shards":1}""")),
             ),
-        ),
-    ): JavaNetQqBotWebSocketGateway {
-        val config = QqBotConfig(
-            enabled = true,
-            appId = "app-id",
-            appSecret = "secret",
         )
-        return JavaNetQqBotWebSocketGateway(
-            config = config,
-            openApiClient = QqBotOpenApiClient(config = config, transport = transport),
-            connector = connector,
-            heartbeatScheduler = scheduler,
+    }
+
+    private fun reconnectTransport(): FakeQqBotHttpTransport {
+        return FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
+            ),
+            getResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(200, """{"url":"wss://api.sgroup.qq.com/websocket","shards":1}"""),
+                    QqBotHttpResponse(200, """{"url":"wss://api.sgroup.qq.com/websocket-reconnect","shards":1}"""),
+                ),
+            ),
         )
     }
 
     private class FakeQqBotWebSocketConnector : QqBotWebSocketConnector {
-        val session = FakeQqBotWebSocketSession()
-        lateinit var listener: QqBotWebSocketListener
-        var connectedUrl: String? = null
+        val sessions: MutableList<FakeQqBotWebSocketSession> = mutableListOf()
+        val listeners: MutableList<QqBotWebSocketListener> = mutableListOf()
+        val connectedUrls: MutableList<String> = mutableListOf()
+        val session: FakeQqBotWebSocketSession
+            get() = sessions.last()
+        val listener: QqBotWebSocketListener
+            get() = listeners.last()
+        val connectedUrl: String?
+            get() = connectedUrls.lastOrNull()
 
         override fun connect(url: String, listener: QqBotWebSocketListener): QqBotWebSocketSession {
-            connectedUrl = url
-            this.listener = listener
+            val session = FakeQqBotWebSocketSession()
+            sessions += session
+            listeners += listener
+            connectedUrls += url
             listener.onOpen()
             return session
         }
@@ -203,7 +319,7 @@ class JavaNetQqBotWebSocketGatewayTest {
         }
     }
 
-    private data class ScheduledTask(
+    private data class ScheduledHeartbeat(
         val initialDelayMillis: Long,
         val intervalMillis: Long,
         val task: () -> Unit,
@@ -211,16 +327,35 @@ class JavaNetQqBotWebSocketGatewayTest {
     )
 
     private class FakeQqBotHeartbeatScheduler : QqBotHeartbeatScheduler {
-        val scheduled: MutableList<ScheduledTask> = mutableListOf()
+        val scheduled: MutableList<ScheduledHeartbeat> = mutableListOf()
 
         override fun scheduleAtFixedRate(
             initialDelayMillis: Long,
             intervalMillis: Long,
             task: () -> Unit,
         ): AutoCloseable {
-            val scheduledTask = ScheduledTask(
+            val scheduledTask = ScheduledHeartbeat(
                 initialDelayMillis = initialDelayMillis,
                 intervalMillis = intervalMillis,
+                task = task,
+            )
+            scheduled += scheduledTask
+            return AutoCloseable { scheduledTask.closed = true }
+        }
+    }
+
+    private data class ScheduledReconnect(
+        val delayMillis: Long,
+        val task: () -> Unit,
+        var closed: Boolean = false,
+    )
+
+    private class FakeQqBotReconnectScheduler : QqBotReconnectScheduler {
+        val scheduled: MutableList<ScheduledReconnect> = mutableListOf()
+
+        override fun schedule(delayMillis: Long, task: () -> Unit): AutoCloseable {
+            val scheduledTask = ScheduledReconnect(
+                delayMillis = delayMillis,
                 task = task,
             )
             scheduled += scheduledTask

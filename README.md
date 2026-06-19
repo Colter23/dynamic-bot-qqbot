@@ -2,7 +2,7 @@
 
 QQ 官方机器人插件骨架，用于后续通过 QQ 官方 API v2 接入 dynamic-bot。
 
-当前已接入 WebSocket 启动骨架：可获取 access token 与 gateway 地址、连接官方 WebSocket、处理 Hello 后 Identify、发送心跳并分发 Dispatch 事件。OpenAPI 发消息、事件映射为 dynamic-bot 入站消息、断线自动重连仍在后续补齐。
+当前已接入 WebSocket 启动骨架：可获取 access token 与 gateway 地址、连接官方 WebSocket、处理 Hello 后 Identify、发送心跳并分发 Dispatch 事件；已支持将单聊/群聊消息事件映射为 dynamic-bot 入站消息，并可通过 OpenAPI 发送单聊/群聊文本消息。富媒体、撤回、断线自动重连仍在后续补齐。
 
 ## 当前包含
 
@@ -13,7 +13,8 @@ QQ 官方机器人插件骨架，用于后续通过 QQ 官方 API v2 接入 dyna
 - WebSocket opcode、Identify、Heartbeat、Hello、Dispatch 协议模型。
 - access token 获取、缓存刷新、`/gateway/bot` 接入点获取组件。
 - 基于 Java 标准库 `java.net.http.WebSocket` 的正向 WebSocket 网关骨架。
-- 消息发送、撤回、目标列表、入站事件入口的接口骨架。
+- 单聊/群聊文本消息发送与命令结果发送。
+- 撤回、目标列表的接口骨架。
 - 插件边界测试，避免直接依赖主程序运行时实现。
 
 ## 预计接入方向

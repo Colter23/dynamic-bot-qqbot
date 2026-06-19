@@ -1,9 +1,11 @@
 package top.colter.dynamic.qqbot
 
 import java.net.URI
+import java.net.URLEncoder
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.nio.charset.StandardCharsets
 import java.time.Duration
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -107,6 +109,26 @@ internal class QqBotOpenApiClient(
         )
     }
 
+    fun sendUserMessage(openid: String, request: QqBotSendRequest): QqBotSendReceipt {
+        val response = transport.postJson(
+            url = "$OPEN_API_BASE_URL/v2/users/${openid.pathSegment()}/messages",
+            headers = authorizedHeaders(),
+            body = encodeSendRequest(request),
+        )
+        ensureSuccess("发送 QQ 官方机器人单聊消息", response)
+        return parseSendReceipt("发送 QQ 官方机器人单聊消息", response)
+    }
+
+    fun sendGroupMessage(groupOpenid: String, request: QqBotSendRequest): QqBotSendReceipt {
+        val response = transport.postJson(
+            url = "$OPEN_API_BASE_URL/v2/groups/${groupOpenid.pathSegment()}/messages",
+            headers = authorizedHeaders(),
+            body = encodeSendRequest(request),
+        )
+        ensureSuccess("发送 QQ 官方机器人群聊消息", response)
+        return parseSendReceipt("发送 QQ 官方机器人群聊消息", response)
+    }
+
     private fun parseSessionStartLimit(element: JsonElement): QqBotSessionStartLimit {
         val root = element.jsonObject
         return QqBotSessionStartLimit(
@@ -148,6 +170,53 @@ internal class QqBotOpenApiClient(
             message = "响应不是有效 JSON 对象：${error.message.orEmpty()}",
             body = body,
         )
+    }
+
+    private fun authorizedHeaders(): Map<String, String> {
+        val token = accessToken()
+        return mapOf(
+            "Accept" to "application/json",
+            "Authorization" to qqBotAuthorization(token.value),
+        )
+    }
+
+    private fun encodeSendRequest(request: QqBotSendRequest): String {
+        require(request.msgType >= 0) { "QQ 官方机器人消息类型不能为负数" }
+        require(request.msgSeq >= 1) { "QQ 官方机器人 msg_seq 必须大于 0" }
+        val replyTo = request.replyToMessageId?.trim()?.takeIf { it.isNotBlank() }
+        return json.encodeToString(
+            buildJsonObject {
+                put("content", JsonPrimitive(request.content.ifBlank { " " }))
+                put("msg_type", JsonPrimitive(request.msgType))
+                if (replyTo != null) {
+                    put("msg_id", JsonPrimitive(replyTo))
+                    put("msg_seq", JsonPrimitive(request.msgSeq))
+                }
+            },
+        )
+    }
+
+    private fun parseSendReceipt(action: String, response: QqBotHttpResponse): QqBotSendReceipt {
+        val root = parseResponseObject(action, response.body)
+        val messageId = root["id"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        if (messageId.isBlank()) {
+            throw QqBotOpenApiException(
+                action = action,
+                statusCode = response.statusCode,
+                message = "响应缺少 id",
+                body = response.body,
+            )
+        }
+        return QqBotSendReceipt(
+            messageId = messageId,
+            rawPayload = response.body,
+        )
+    }
+
+    private fun String.pathSegment(): String {
+        val value = trim()
+        require(value.isNotBlank()) { "QQ 官方机器人 OpenAPI 路径参数不能为空" }
+        return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20")
     }
 
     companion object {

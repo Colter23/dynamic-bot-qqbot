@@ -136,13 +136,35 @@ public class QqBotGatewayPlugin :
         if (!supportsTarget(request.target)) {
             return MessageSendResult.failed("目标平台不是 QQ 或类型不受支持", retryable = false)
         }
-        accountIdFromRoute(routeId)
+        val accountId = accountIdFromRoute(routeId)
             ?: return MessageSendResult.failed("QQ 官方机器人路线 ID 无效：$routeId", retryable = false)
+        if (!isAccountReady(accountId)) {
+            return MessageSendResult.failed("QQ 官方机器人账号不可用：$accountId")
+        }
 
-        return when (QqBotTarget.fromAddress(request.target)) {
-            is QqBotTarget.User,
-            is QqBotTarget.Group,
-            -> MessageSendResult.failed("QQ 官方机器人发送实现尚未接入", retryable = false)
+        return when (val target = QqBotTarget.fromAddress(request.target)) {
+            is QqBotTarget.User -> sendWithReceipt(
+                routeId = routeId,
+                accountId = accountId,
+                failureLabel = "QQ 官方机器人单聊消息发送失败",
+            ) {
+                gateway.sendUserMessage(
+                    accountId = accountId,
+                    openid = target.openid,
+                    request = QqBotMessageMapper.toTextRequest(request.batches),
+                )
+            }
+            is QqBotTarget.Group -> sendWithReceipt(
+                routeId = routeId,
+                accountId = accountId,
+                failureLabel = "QQ 官方机器人群聊消息发送失败",
+            ) {
+                gateway.sendGroupMessage(
+                    accountId = accountId,
+                    groupOpenid = target.groupOpenid,
+                    request = QqBotMessageMapper.toTextRequest(request.batches),
+                )
+            }
             is QqBotTarget.Unsupported -> MessageSendResult.failed("目标类型不受支持", retryable = false)
         }
     }
@@ -155,9 +177,36 @@ public class QqBotGatewayPlugin :
         if (!supportsTarget(request.target.address)) {
             return MessageSendResult.failed("目标平台不是 QQ 或类型不受支持", retryable = false)
         }
-        accountIdFromRoute(routeId)
+        val accountId = accountIdFromRoute(routeId)
             ?: return MessageSendResult.failed("QQ 官方机器人路线 ID 无效：$routeId", retryable = false)
-        return MessageSendResult.failed("QQ 官方机器人命令结果发送实现尚未接入", retryable = false)
+        if (!isAccountReady(accountId)) {
+            return MessageSendResult.failed("QQ 官方机器人账号不可用：$accountId")
+        }
+        return when (val target = QqBotTarget.fromAddress(request.target.address)) {
+            is QqBotTarget.User -> sendWithReceipt(
+                routeId = routeId,
+                accountId = accountId,
+                failureLabel = "QQ 官方机器人命令结果发送失败",
+            ) {
+                gateway.sendUserMessage(
+                    accountId = accountId,
+                    openid = target.openid,
+                    request = QqBotMessageMapper.toTextRequest(request.chain),
+                )
+            }
+            is QqBotTarget.Group -> sendWithReceipt(
+                routeId = routeId,
+                accountId = accountId,
+                failureLabel = "QQ 官方机器人命令结果发送失败",
+            ) {
+                gateway.sendGroupMessage(
+                    accountId = accountId,
+                    groupOpenid = target.groupOpenid,
+                    request = QqBotMessageMapper.toTextRequest(request.chain),
+                )
+            }
+            is QqBotTarget.Unsupported -> MessageSendResult.failed("目标类型不受支持", retryable = false)
+        }
     }
 
     override suspend fun recallMessage(request: MessageRecallRequest, routeId: String): MessageRecallResult {
@@ -230,6 +279,33 @@ public class QqBotGatewayPlugin :
     )
 
     private fun routeId(accountId: String): String = "$transportId:${QQBOT_PLATFORM_ID.value}:$accountId"
+
+    private suspend fun isAccountReady(accountId: String): Boolean {
+        return gateway.availableAccounts().any {
+            it.accountId == accountId && it.state == MessageSinkRouteState.READY
+        }
+    }
+
+    private suspend fun sendWithReceipt(
+        routeId: String,
+        accountId: String,
+        failureLabel: String,
+        send: suspend () -> QqBotSendReceipt,
+    ): MessageSendResult {
+        return runCatching { send() }
+            .fold(
+                onSuccess = { receipt ->
+                    MessageSendResult.sent(
+                        sinkMessageId = receipt.messageId,
+                        sinkRouteId = routeId,
+                        sinkAccountId = accountId,
+                        sinkTransportId = transportId,
+                        sinkMessageIds = listOf(receipt.messageId),
+                    )
+                },
+                onFailure = { error -> MessageSendResult.failed(error.message ?: failureLabel) },
+            )
+    }
 
     private fun accountIdFromRoute(routeId: String): String? {
         val prefix = "$transportId:${QQBOT_PLATFORM_ID.value}:"

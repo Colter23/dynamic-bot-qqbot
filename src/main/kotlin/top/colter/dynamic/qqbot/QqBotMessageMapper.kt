@@ -11,6 +11,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import top.colter.dynamic.core.data.IncomingMessage
 import top.colter.dynamic.core.data.IncomingMessageSegment
 import top.colter.dynamic.core.data.MessageBatch
+import top.colter.dynamic.core.data.MessageContent
 import top.colter.dynamic.core.data.TargetAddress
 import top.colter.dynamic.core.data.TargetKind
 
@@ -18,6 +19,7 @@ internal data class QqBotSendRequest(
     val content: String,
     val msgType: Int = 0,
     val replyToMessageId: String? = null,
+    val msgSeq: Int = 1,
 )
 
 internal data class QqBotSendReceipt(
@@ -35,10 +37,19 @@ internal object QqBotMessageMapper {
             .joinToString(separator = "\n") { it.fallbackText }
             .trim()
         return QqBotSendRequest(
-            content = content,
+            content = content.ifBlank { QQBOT_EMPTY_MESSAGE_TEXT },
             msgType = 0,
-            replyToMessageId = replyToMessageId,
+            replyToMessageId = replyToMessageId?.trim()?.takeIf { it.isNotBlank() }
+                ?: batches.firstReplyMessageId(),
         )
+    }
+
+    private fun List<MessageBatch>.firstReplyMessageId(): String? {
+        return asSequence()
+            .flatMap { it.content.asSequence() }
+            .filterIsInstance<MessageContent.Reply>()
+            .mapNotNull { it.messageId.trim().takeIf(String::isNotBlank) }
+            .firstOrNull()
     }
 }
 
@@ -192,3 +203,4 @@ private data class QqBotIncomingAttachment(
 internal const val QQBOT_RAW_FORMAT: String = "qqbot-api-v2-dispatch-json"
 internal const val QQBOT_C2C_MESSAGE_CREATE: String = "C2C_MESSAGE_CREATE"
 internal const val QQBOT_GROUP_AT_MESSAGE_CREATE: String = "GROUP_AT_MESSAGE_CREATE"
+private const val QQBOT_EMPTY_MESSAGE_TEXT: String = "（空消息）"

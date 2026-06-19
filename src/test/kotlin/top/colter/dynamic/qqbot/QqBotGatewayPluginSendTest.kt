@@ -1,0 +1,150 @@
+package top.colter.dynamic.qqbot
+
+import kotlinx.coroutines.runBlocking
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertIs
+import top.colter.dynamic.core.data.CommandTarget
+import top.colter.dynamic.core.data.DeliveryStatus
+import top.colter.dynamic.core.data.Message
+import top.colter.dynamic.core.data.MessageBatch
+import top.colter.dynamic.core.data.MessageContent
+import top.colter.dynamic.core.data.MessageDelivery
+import top.colter.dynamic.core.data.TargetAddress
+import top.colter.dynamic.core.data.TargetKind
+import top.colter.dynamic.core.plugin.CommandResultSendRequest
+import top.colter.dynamic.core.plugin.MessageDeliveryRequest
+import top.colter.dynamic.core.plugin.MessageSendResult
+import top.colter.dynamic.core.plugin.MessageSinkRouteState
+
+class QqBotGatewayPluginSendTest {
+    @Test
+    fun `sendMessage sends user text and returns receipt`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendMessage(
+            request = deliveryRequest(TargetAddress.of("qq", TargetKind.USER, "user-openid"), "hello"),
+            routeId = "qqbot:qq:app-id",
+        )
+
+        val sent = assertIs<MessageSendResult.Sent>(result)
+        assertEquals("user-send-1", sent.sinkMessageId)
+        assertEquals("qqbot:qq:app-id", sent.sinkRouteId)
+        assertEquals("app-id", sent.sinkAccountId)
+        assertEquals("qqbot", sent.sinkTransportId)
+        assertEquals(listOf("app-id:user:user-openid:hello"), gateway.sendCalls)
+    }
+
+    @Test
+    fun `sendCommandResult sends group text and returns receipt`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendCommandResult(
+            request = CommandResultSendRequest(
+                target = CommandTarget(TargetAddress.of("qq", TargetKind.GROUP, "group-openid"), senderId = "member-openid"),
+                chain = listOf(MessageBatch(listOf(MessageContent.Text("ok")))),
+                inReplyTo = "trace-id",
+            ),
+            routeId = "qqbot:qq:app-id",
+        )
+
+        val sent = assertIs<MessageSendResult.Sent>(result)
+        assertEquals("group-send-1", sent.sinkMessageId)
+        assertEquals(listOf("app-id:group:group-openid:ok"), gateway.sendCalls)
+    }
+
+    @Test
+    fun `sendMessage rejects unavailable account without sending`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway(state = MessageSinkRouteState.UNAVAILABLE)
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendMessage(
+            request = deliveryRequest(TargetAddress.of("qq", TargetKind.USER, "user-openid"), "hello"),
+            routeId = "qqbot:qq:app-id",
+        )
+
+        val failed = assertIs<MessageSendResult.Failed>(result)
+        assertEquals("QQ 官方机器人账号不可用：app-id", failed.reason)
+        assertEquals(emptyList(), gateway.sendCalls)
+    }
+
+    private fun QqBotGatewayPlugin.prepareSendTest(): QqBotGatewayPlugin {
+        setPrivate("config", QqBotConfig())
+        return this
+    }
+
+    private fun deliveryRequest(target: TargetAddress, text: String): MessageDeliveryRequest {
+        val message = Message(
+            id = "message-1",
+            time = 1,
+            targets = listOf(target),
+            batches = listOf(MessageBatch(listOf(MessageContent.Text(text)))),
+        )
+        return MessageDeliveryRequest(
+            delivery = MessageDelivery(
+                id = 1,
+                messageId = message.id,
+                target = target,
+                status = DeliveryStatus.SENDING,
+                attempts = 1,
+                createdAtEpochSeconds = 1,
+                updatedAtEpochSeconds = 1,
+            ),
+            message = message,
+        )
+    }
+
+    private class FakeGateway(
+        private val state: MessageSinkRouteState = MessageSinkRouteState.READY,
+    ) : QqBotGateway {
+        val sendCalls: MutableList<String> = mutableListOf()
+
+        override suspend fun connect(onIncomingEvent: (QqBotIncomingEvent) -> Unit) {
+        }
+
+        override suspend fun availableAccounts(): List<QqBotRuntimeAccount> {
+            return listOf(QqBotRuntimeAccount(accountId = "app-id", name = "测试 Bot", state = state))
+        }
+
+        override suspend fun sendUserMessage(
+            accountId: String,
+            openid: String,
+            request: QqBotSendRequest,
+        ): QqBotSendReceipt {
+            sendCalls += "$accountId:user:$openid:${request.content}"
+            return QqBotSendReceipt(messageId = "user-send-1")
+        }
+
+        override suspend fun sendGroupMessage(
+            accountId: String,
+            groupOpenid: String,
+            request: QqBotSendRequest,
+        ): QqBotSendReceipt {
+            sendCalls += "$accountId:group:$groupOpenid:${request.content}"
+            return QqBotSendReceipt(messageId = "group-send-1")
+        }
+
+        override suspend fun recallUserMessage(accountId: String, openid: String, messageId: String) {
+        }
+
+        override suspend fun recallGroupMessage(accountId: String, groupOpenid: String, messageId: String) {
+        }
+
+        override fun close() {
+        }
+    }
+}
+
+private fun Any.setPrivate(name: String, value: Any?) {
+    val field = javaClass.getDeclaredField(name)
+    field.isAccessible = true
+    field.set(this, value)
+}

@@ -66,13 +66,19 @@ internal class JavaNetQqBotWebSocketGateway(
         accountId: String,
         openid: String,
         request: QqBotSendRequest,
-    ): QqBotSendReceipt = notImplemented()
+    ): QqBotSendReceipt = withContext(Dispatchers.IO) {
+        requireAccount(accountId)
+        openApiClient.sendUserMessage(openid, request)
+    }
 
     override suspend fun sendGroupMessage(
         accountId: String,
         groupOpenid: String,
         request: QqBotSendRequest,
-    ): QqBotSendReceipt = notImplemented()
+    ): QqBotSendReceipt = withContext(Dispatchers.IO) {
+        requireAccount(accountId)
+        openApiClient.sendGroupMessage(groupOpenid, request)
+    }
 
     override suspend fun recallUserMessage(accountId: String, openid: String, messageId: String) {
         notImplemented<Unit>()
@@ -183,8 +189,14 @@ internal class JavaNetQqBotWebSocketGateway(
         )
     }
 
+    private fun requireAccount(accountId: String) {
+        val current = account ?: error("QQ 官方机器人账号尚未初始化")
+        require(current.accountId == accountId) { "QQ 官方机器人账号不匹配：expected=${current.accountId} actual=$accountId" }
+        require(current.state == MessageSinkRouteState.READY) { "QQ 官方机器人账号不可用：$accountId" }
+    }
+
     private fun <T> notImplemented(): T {
-        throw UnsupportedOperationException("QQ 官方机器人 OpenAPI 消息发送实现尚未接入")
+        throw UnsupportedOperationException("QQ 官方机器人 OpenAPI 消息撤回实现尚未接入")
     }
 
     private fun AutoCloseable.closeQuietly() {

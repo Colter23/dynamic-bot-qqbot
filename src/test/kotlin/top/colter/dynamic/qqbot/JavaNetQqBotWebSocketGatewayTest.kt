@@ -113,18 +113,55 @@ class JavaNetQqBotWebSocketGatewayTest {
         assertEquals(MessageSinkRouteState.UNAVAILABLE, gateway.availableAccounts().single().state)
     }
 
+    @Test
+    fun `ready gateway sends user and group messages through openapi`() = runTest {
+        val connector = FakeQqBotWebSocketConnector()
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}"""),
+                    QqBotHttpResponse(200, """{"id":"user-send-1"}"""),
+                    QqBotHttpResponse(200, """{"id":"group-send-1"}"""),
+                ),
+            ),
+            getResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"url":"wss://api.sgroup.qq.com/websocket","shards":1}""")),
+            ),
+        )
+        val gateway = testGateway(connector = connector, transport = transport)
+
+        gateway.connect { }
+        connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+
+        val userReceipt = gateway.sendUserMessage(
+            accountId = "app-id",
+            openid = "user-openid",
+            request = QqBotSendRequest(content = "hello"),
+        )
+        val groupReceipt = gateway.sendGroupMessage(
+            accountId = "app-id",
+            groupOpenid = "group-openid",
+            request = QqBotSendRequest(content = "group hello"),
+        )
+
+        assertEquals("user-send-1", userReceipt.messageId)
+        assertEquals("group-send-1", groupReceipt.messageId)
+        assertEquals("https://api.sgroup.qq.com/v2/users/user-openid/messages", transport.posts[1].url)
+        assertEquals("https://api.sgroup.qq.com/v2/groups/group-openid/messages", transport.posts[2].url)
+    }
+
     private fun testGateway(
         connector: FakeQqBotWebSocketConnector = FakeQqBotWebSocketConnector(),
         scheduler: FakeQqBotHeartbeatScheduler = FakeQqBotHeartbeatScheduler(),
-    ): JavaNetQqBotWebSocketGateway {
-        val transport = FakeQqBotHttpTransport(
+        transport: FakeQqBotHttpTransport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(
                 listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
             ),
             getResponses = ArrayDeque(
                 listOf(QqBotHttpResponse(200, """{"url":"wss://api.sgroup.qq.com/websocket","shards":1}""")),
             ),
-        )
+        ),
+    ): JavaNetQqBotWebSocketGateway {
         val config = QqBotConfig(
             enabled = true,
             appId = "app-id",

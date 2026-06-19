@@ -1,6 +1,7 @@
 package top.colter.dynamic.qqbot
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
@@ -143,6 +144,70 @@ class QqBotOpenApiClientTest {
         }
 
         assertEquals("响应缺少 url", error.message)
+    }
+
+    @Test
+    fun `user message send posts official text payload`() {
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}"""),
+                    QqBotHttpResponse(200, """{"id":"send-1","timestamp":"2026-06-19T04:00:00Z"}"""),
+                ),
+            ),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        val receipt = client.sendUserMessage(
+            openid = "user/open id",
+            request = QqBotSendRequest(
+                content = "hello",
+                replyToMessageId = "source-msg",
+                msgSeq = 2,
+            ),
+        )
+
+        assertEquals("send-1", receipt.messageId)
+        val sent = transport.posts.last()
+        assertEquals("https://api.sgroup.qq.com/v2/users/user%2Fopen%20id/messages", sent.url)
+        assertEquals("QQBot token-a", sent.headers.getValue("Authorization"))
+        val body = Json.parseToJsonElement(sent.body).jsonObject
+        assertEquals("hello", body.getValue("content").jsonPrimitive.content)
+        assertEquals(0, body.getValue("msg_type").jsonPrimitive.int)
+        assertEquals("source-msg", body.getValue("msg_id").jsonPrimitive.content)
+        assertEquals(2, body.getValue("msg_seq").jsonPrimitive.int)
+    }
+
+    @Test
+    fun `group message send can post plain text without reply id`() {
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}"""),
+                    QqBotHttpResponse(200, """{"id":"group-send-1"}"""),
+                ),
+            ),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        val receipt = client.sendGroupMessage(
+            groupOpenid = "group-openid",
+            request = QqBotSendRequest(content = "group hello"),
+        )
+
+        assertEquals("group-send-1", receipt.messageId)
+        val sent = transport.posts.last()
+        assertEquals("https://api.sgroup.qq.com/v2/groups/group-openid/messages", sent.url)
+        val body = Json.parseToJsonElement(sent.body).jsonObject
+        assertEquals("group hello", body.getValue("content").jsonPrimitive.content)
+        assertEquals(false, "msg_id" in body)
+        assertEquals(false, "msg_seq" in body)
     }
 
     private data class RecordedPost(

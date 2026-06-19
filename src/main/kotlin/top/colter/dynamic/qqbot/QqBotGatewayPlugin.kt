@@ -230,9 +230,33 @@ public class QqBotGatewayPlugin :
         if (!supportsTarget(request.target)) {
             return MessageRecallResult.failed("目标平台不是 QQ 或类型不受支持")
         }
-        accountIdFromRoute(routeId)
+        val accountId = accountIdFromRoute(routeId)
             ?: return MessageRecallResult.failed("QQ 官方机器人路线 ID 无效：$routeId")
-        return MessageRecallResult.unsupported()
+        if (!isAccountReady(accountId)) {
+            return MessageRecallResult.failed("QQ 官方机器人账号不可用：$accountId")
+        }
+        val messageId = request.sinkMessageId.trim()
+        if (messageId.isBlank()) {
+            return MessageRecallResult.failed("QQ 官方机器人消息 ID 为空，无法撤回")
+        }
+
+        return when (val target = QqBotTarget.fromAddress(request.target)) {
+            is QqBotTarget.User -> recallWithResult("QQ 官方机器人单聊消息撤回失败") {
+                gateway.recallUserMessage(
+                    accountId = accountId,
+                    openid = target.openid,
+                    messageId = messageId,
+                )
+            }
+            is QqBotTarget.Group -> recallWithResult("QQ 官方机器人群聊消息撤回失败") {
+                gateway.recallGroupMessage(
+                    accountId = accountId,
+                    groupOpenid = target.groupOpenid,
+                    messageId = messageId,
+                )
+            }
+            is QqBotTarget.Unsupported -> MessageRecallResult.failed(target.reason)
+        }
     }
 
     override suspend fun listMessageTargets(kind: TargetKind?): List<MessageTargetCandidate> = emptyList()
@@ -336,6 +360,17 @@ public class QqBotGatewayPlugin :
                     )
                 },
                 onFailure = { error -> MessageSendResult.failed(error.message ?: failureLabel) },
+            )
+    }
+
+    private suspend fun recallWithResult(
+        failureLabel: String,
+        recall: suspend () -> Unit,
+    ): MessageRecallResult {
+        return runCatching { recall() }
+            .fold(
+                onSuccess = { MessageRecallResult.recalled() },
+                onFailure = { error -> MessageRecallResult.failed(error.message ?: failureLabel) },
             )
     }
 

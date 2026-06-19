@@ -129,6 +129,22 @@ internal class QqBotOpenApiClient(
         return parseSendReceipt("发送 QQ 官方机器人群聊消息", response)
     }
 
+    fun recallUserMessage(openid: String, messageId: String) {
+        val response = transport.delete(
+            url = "$OPEN_API_BASE_URL/v2/users/${openid.pathSegment()}/messages/${messageId.pathSegment()}",
+            headers = authorizedHeaders(),
+        )
+        ensureSuccess("撤回 QQ 官方机器人单聊消息", response)
+    }
+
+    fun recallGroupMessage(groupOpenid: String, messageId: String) {
+        val response = transport.delete(
+            url = "$OPEN_API_BASE_URL/v2/groups/${groupOpenid.pathSegment()}/messages/${messageId.pathSegment()}",
+            headers = authorizedHeaders(),
+        )
+        ensureSuccess("撤回 QQ 官方机器人群聊消息", response)
+    }
+
     private fun parseSessionStartLimit(element: JsonElement): QqBotSessionStartLimit {
         val root = element.jsonObject
         return QqBotSessionStartLimit(
@@ -274,6 +290,8 @@ internal interface QqBotHttpTransport {
     fun postJson(url: String, headers: Map<String, String>, body: String): QqBotHttpResponse
 
     fun get(url: String, headers: Map<String, String>): QqBotHttpResponse
+
+    fun delete(url: String, headers: Map<String, String>): QqBotHttpResponse
 }
 
 internal data class QqBotHttpResponse(
@@ -297,6 +315,13 @@ internal class JavaNetQqBotHttpTransport(
     override fun get(url: String, headers: Map<String, String>): QqBotHttpResponse {
         val request = baseRequest(url, headers)
             .GET()
+            .build()
+        return send(request)
+    }
+
+    override fun delete(url: String, headers: Map<String, String>): QqBotHttpResponse {
+        val request = baseRequest(url, headers)
+            .DELETE()
             .build()
         return send(request)
     }

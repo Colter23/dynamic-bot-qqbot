@@ -210,6 +210,50 @@ class QqBotOpenApiClientTest {
         assertEquals(false, "msg_seq" in body)
     }
 
+    @Test
+    fun `单聊消息撤回提交官方 delete 请求`() {
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
+            ),
+            deleteResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(204, "")),
+            ),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        client.recallUserMessage(openid = "user/open id", messageId = "msg/1")
+
+        val deleted = transport.deletes.single()
+        assertEquals("https://api.sgroup.qq.com/v2/users/user%2Fopen%20id/messages/msg%2F1", deleted.url)
+        assertEquals("QQBot token-a", deleted.headers.getValue("Authorization"))
+    }
+
+    @Test
+    fun `群聊消息撤回提交官方 delete 请求`() {
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
+            ),
+            deleteResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(204, "")),
+            ),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        client.recallGroupMessage(groupOpenid = "group-openid", messageId = "group-msg-1")
+
+        val deleted = transport.deletes.single()
+        assertEquals("https://api.sgroup.qq.com/v2/groups/group-openid/messages/group-msg-1", deleted.url)
+        assertEquals("QQBot token-a", deleted.headers.getValue("Authorization"))
+    }
+
     private data class RecordedPost(
         val url: String,
         val headers: Map<String, String>,
@@ -221,12 +265,19 @@ class QqBotOpenApiClientTest {
         val headers: Map<String, String>,
     )
 
+    private data class RecordedDelete(
+        val url: String,
+        val headers: Map<String, String>,
+    )
+
     private class FakeQqBotHttpTransport(
         private val postResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
         private val getResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
+        private val deleteResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
     ) : QqBotHttpTransport {
         val posts: MutableList<RecordedPost> = mutableListOf()
         val gets: MutableList<RecordedGet> = mutableListOf()
+        val deletes: MutableList<RecordedDelete> = mutableListOf()
 
         override fun postJson(url: String, headers: Map<String, String>, body: String): QqBotHttpResponse {
             posts += RecordedPost(url = url, headers = headers, body = body)
@@ -236,6 +287,11 @@ class QqBotOpenApiClientTest {
         override fun get(url: String, headers: Map<String, String>): QqBotHttpResponse {
             gets += RecordedGet(url = url, headers = headers)
             return getResponses.removeFirst()
+        }
+
+        override fun delete(url: String, headers: Map<String, String>): QqBotHttpResponse {
+            deletes += RecordedDelete(url = url, headers = headers)
+            return deleteResponses.removeFirst()
         }
     }
 }

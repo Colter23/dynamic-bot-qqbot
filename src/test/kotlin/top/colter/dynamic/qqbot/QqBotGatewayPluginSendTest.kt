@@ -15,6 +15,8 @@ import top.colter.dynamic.core.data.TargetAddress
 import top.colter.dynamic.core.data.TargetKind
 import top.colter.dynamic.core.plugin.CommandResultSendRequest
 import top.colter.dynamic.core.plugin.MessageDeliveryRequest
+import top.colter.dynamic.core.plugin.MessageRecallRequest
+import top.colter.dynamic.core.plugin.MessageRecallResult
 import top.colter.dynamic.core.plugin.MessageSendResult
 import top.colter.dynamic.core.plugin.MessageSinkRouteState
 
@@ -110,6 +112,84 @@ class QqBotGatewayPluginSendTest {
         assertEquals(emptyList(), gateway.sendCalls)
     }
 
+    @Test
+    fun `recallMessage 撤回单聊消息`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.recallMessage(
+            request = MessageRecallRequest(
+                target = TargetAddress.of("qq", TargetKind.USER, "user-openid"),
+                sinkMessageId = "user-send-1",
+            ),
+            routeId = "qqbot:qq:app-id",
+        )
+
+        assertIs<MessageRecallResult.Recalled>(result)
+        assertEquals(listOf("app-id:user:user-openid:user-send-1"), gateway.recallCalls)
+    }
+
+    @Test
+    fun `recallMessage 撤回群聊消息`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.recallMessage(
+            request = MessageRecallRequest(
+                target = TargetAddress.of("qq", TargetKind.GROUP, "group-openid"),
+                sinkMessageId = "group-send-1",
+            ),
+            routeId = "qqbot:qq:app-id",
+        )
+
+        assertIs<MessageRecallResult.Recalled>(result)
+        assertEquals(listOf("app-id:group:group-openid:group-send-1"), gateway.recallCalls)
+    }
+
+    @Test
+    fun `recallMessage 拒绝空消息 id`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.recallMessage(
+            request = MessageRecallRequest(
+                target = TargetAddress.of("qq", TargetKind.GROUP, "group-openid"),
+                sinkMessageId = "   ",
+            ),
+            routeId = "qqbot:qq:app-id",
+        )
+
+        val failed = assertIs<MessageRecallResult.Failed>(result)
+        assertEquals("QQ 官方机器人消息 ID 为空，无法撤回", failed.reason)
+        assertEquals(emptyList(), gateway.recallCalls)
+    }
+
+    @Test
+    fun `recallMessage 拒绝不可用账号`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway(state = MessageSinkRouteState.UNAVAILABLE)
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.recallMessage(
+            request = MessageRecallRequest(
+                target = TargetAddress.of("qq", TargetKind.USER, "user-openid"),
+                sinkMessageId = "user-send-1",
+            ),
+            routeId = "qqbot:qq:app-id",
+        )
+
+        val failed = assertIs<MessageRecallResult.Failed>(result)
+        assertEquals("QQ 官方机器人账号不可用：app-id", failed.reason)
+        assertEquals(emptyList(), gateway.recallCalls)
+    }
+
     private fun QqBotGatewayPlugin.prepareSendTest(): QqBotGatewayPlugin {
         setPrivate("config", QqBotConfig())
         return this
@@ -141,6 +221,7 @@ class QqBotGatewayPluginSendTest {
     ) : QqBotGateway {
         val sendCalls: MutableList<String> = mutableListOf()
         val sentRequests: MutableList<QqBotSendRequest> = mutableListOf()
+        val recallCalls: MutableList<String> = mutableListOf()
 
         override suspend fun connect(onIncomingEvent: (QqBotIncomingEvent) -> Unit) {
         }
@@ -170,9 +251,11 @@ class QqBotGatewayPluginSendTest {
         }
 
         override suspend fun recallUserMessage(accountId: String, openid: String, messageId: String) {
+            recallCalls += "$accountId:user:$openid:$messageId"
         }
 
         override suspend fun recallGroupMessage(accountId: String, groupOpenid: String, messageId: String) {
+            recallCalls += "$accountId:group:$groupOpenid:$messageId"
         }
 
         override fun close() {

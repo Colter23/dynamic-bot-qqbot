@@ -283,6 +283,44 @@ class JavaNetQqBotWebSocketGatewayTest {
         assertEquals("https://api.sgroup.qq.com/v2/groups/group-openid/messages", transport.posts[2].url)
     }
 
+    @Test
+    fun `就绪网关通过 openapi 撤回单聊和群聊消息`() = runTest {
+        val connector = FakeQqBotWebSocketConnector()
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
+            ),
+            getResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"url":"wss://api.sgroup.qq.com/websocket","shards":1}""")),
+            ),
+            deleteResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(204, ""),
+                    QqBotHttpResponse(204, ""),
+                ),
+            ),
+        )
+        val gateway = testGateway(connector = connector, transport = transport)
+
+        gateway.connect { }
+        connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        connector.listener.onText("""{"op":0,"s":88,"t":"READY","d":{"session_id":"session-a"}}""")
+
+        gateway.recallUserMessage(
+            accountId = "app-id",
+            openid = "user-openid",
+            messageId = "user-send-1",
+        )
+        gateway.recallGroupMessage(
+            accountId = "app-id",
+            groupOpenid = "group-openid",
+            messageId = "group-send-1",
+        )
+
+        assertEquals("https://api.sgroup.qq.com/v2/users/user-openid/messages/user-send-1", transport.deletes[0].url)
+        assertEquals("https://api.sgroup.qq.com/v2/groups/group-openid/messages/group-send-1", transport.deletes[1].url)
+    }
+
     private fun testGateway(
         connector: FakeQqBotWebSocketConnector = FakeQqBotWebSocketConnector(),
         heartbeatScheduler: FakeQqBotHeartbeatScheduler = FakeQqBotHeartbeatScheduler(),
@@ -421,12 +459,19 @@ class JavaNetQqBotWebSocketGatewayTest {
         val headers: Map<String, String>,
     )
 
+    private data class RecordedDelete(
+        val url: String,
+        val headers: Map<String, String>,
+    )
+
     private class FakeQqBotHttpTransport(
         private val postResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
         private val getResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
+        private val deleteResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
     ) : QqBotHttpTransport {
         val posts: MutableList<RecordedPost> = mutableListOf()
         val gets: MutableList<RecordedGet> = mutableListOf()
+        val deletes: MutableList<RecordedDelete> = mutableListOf()
 
         override fun postJson(url: String, headers: Map<String, String>, body: String): QqBotHttpResponse {
             posts += RecordedPost(url = url, headers = headers, body = body)
@@ -436,6 +481,11 @@ class JavaNetQqBotWebSocketGatewayTest {
         override fun get(url: String, headers: Map<String, String>): QqBotHttpResponse {
             gets += RecordedGet(url = url, headers = headers)
             return getResponses.removeFirst()
+        }
+
+        override fun delete(url: String, headers: Map<String, String>): QqBotHttpResponse {
+            deletes += RecordedDelete(url = url, headers = headers)
+            return deleteResponses.removeFirst()
         }
     }
 }

@@ -103,11 +103,17 @@ internal class JavaNetQqBotWebSocketGateway(
     }
 
     override suspend fun recallUserMessage(accountId: String, openid: String, messageId: String) {
-        notImplemented<Unit>()
+        withContext(Dispatchers.IO) {
+            requireAccount(accountId)
+            openApiClient.recallUserMessage(openid, messageId)
+        }
     }
 
     override suspend fun recallGroupMessage(accountId: String, groupOpenid: String, messageId: String) {
-        notImplemented<Unit>()
+        withContext(Dispatchers.IO) {
+            requireAccount(accountId)
+            openApiClient.recallGroupMessage(groupOpenid, messageId)
+        }
     }
 
     override fun close() {
@@ -365,10 +371,6 @@ internal class JavaNetQqBotWebSocketGateway(
             "QQ 官方机器人账号不匹配：期望=${current.accountId} 实际=$accountId"
         }
         require(current.state == MessageSinkRouteState.READY) { "QQ 官方机器人账号不可用：$accountId" }
-    }
-
-    private fun <T> notImplemented(): T {
-        throw UnsupportedOperationException("QQ 官方机器人撤回 OpenAPI 暂未实现")
     }
 
     private fun AutoCloseable?.closeAndClear(clear: () -> Unit) {

@@ -83,74 +83,99 @@ internal object QqBotMessageMapper {
         val normalizedReplyTo = replyToMessageId?.trim()?.takeIf { it.isNotBlank() }
             ?: batches.firstReplyMessageId()
         val items = mutableListOf<QqBotSendPlanItem>()
-        val pendingText = mutableListOf<String>()
         var nextMsgSeq = 1
 
         fun nextRequest(content: String, msgType: Int): QqBotSendRequest {
+            val normalizedContent = if (msgType == QQBOT_MEDIA_MSG_TYPE) {
+                content.trim().ifBlank { " " }
+            } else {
+                content.trim().ifBlank { QQBOT_EMPTY_MESSAGE_TEXT }
+            }
             return QqBotSendRequest(
-                content = content,
+                content = normalizedContent,
                 msgType = msgType,
                 replyToMessageId = normalizedReplyTo,
                 msgSeq = nextMsgSeq++,
             )
         }
 
-        fun addText(text: String) {
-            text.trim().takeIf { it.isNotBlank() }?.let { pendingText += it }
-        }
+        batches.forEach { batch ->
+            val mediaCandidates = mutableListOf<QqBotBatchMediaCandidate>()
+            val textParts = mutableListOf<String>()
 
-        fun flushText() {
-            val content = pendingText.joinToString(separator = "\n").trim()
-            pendingText.clear()
-            if (content.isNotBlank()) {
-                items += QqBotSendPlanItem.Text(nextRequest(content = content, msgType = QQBOT_TEXT_MSG_TYPE))
-            }
-        }
-
-        fun addMedia(fileType: QqBotMediaFileType, uri: String, fallbackText: String) {
-            val source = toMediaResourceSource(fileType, uri)
-            if (source == null) {
-                addText(fallbackText.ifBlank { "（暂不支持发送${fileType.label}，请使用 HTTP(S) URL 或 base64 数据）" })
-                return
-            }
-
-            flushText()
-            items += QqBotSendPlanItem.Media(
-                media = source,
-                request = nextRequest(
-                    content = fallbackText.trim().ifBlank { " " },
-                    msgType = QQBOT_MEDIA_MSG_TYPE,
-                ),
-            )
-        }
-
-        batches.asSequence()
-            .flatMap { it.content.asSequence() }
-            .forEach { content ->
-                when (content) {
-                    is MessageContent.Image -> addMedia(
-                        fileType = QqBotMediaFileType.IMAGE,
-                        uri = content.image.uri,
-                        fallbackText = content.fallbackText,
-                    )
-                    is MessageContent.Video -> addMedia(
-                        fileType = QqBotMediaFileType.VIDEO,
-                        uri = content.video.uri,
-                        fallbackText = content.fallbackText,
-                    )
-                    is MessageContent.Audio -> addMedia(
-                        fileType = QqBotMediaFileType.AUDIO,
-                        uri = content.audio.uri,
-                        fallbackText = content.fallbackText,
-                    )
-                    else -> addText(content.fallbackText)
+            batch.content.forEach { content ->
+                val media = content.toMediaCandidate()
+                if (media != null) {
+                    mediaCandidates += media
+                    if (media.source == null) {
+                        textParts += media.fallbackText.ifBlank {
+                            "（暂不支持发送${media.fileType.label}，请使用 HTTP(S) URL 或 base64 数据）"
+                        }
+                    } else {
+                        textParts += media.fallbackText
+                    }
+                } else {
+                    textParts += content.fallbackText
                 }
             }
-        flushText()
+
+            val text = textParts.joinNonBlankLines()
+            val sendableMedia = mediaCandidates.firstOrNull { it.source != null }
+            if (sendableMedia?.source != null) {
+                items += QqBotSendPlanItem.Media(
+                    media = sendableMedia.source,
+                    request = nextRequest(
+                        content = text.ifBlank { " " },
+                        msgType = QQBOT_MEDIA_MSG_TYPE,
+                    ),
+                )
+                mediaCandidates.dropWhile { it !== sendableMedia }
+                    .drop(1)
+                    .filter { it.source != null }
+                    .forEach { extraMedia ->
+                        items += QqBotSendPlanItem.Media(
+                            media = extraMedia.source!!,
+                            request = nextRequest(
+                                content = extraMedia.fallbackText.ifBlank { " " },
+                                msgType = QQBOT_MEDIA_MSG_TYPE,
+                            ),
+                        )
+                    }
+            } else if (text.isNotBlank()) {
+                items += QqBotSendPlanItem.Text(nextRequest(content = text, msgType = QQBOT_TEXT_MSG_TYPE))
+            }
+        }
 
         return items.ifEmpty {
             listOf(QqBotSendPlanItem.Text(toTextRequest(batches = batches, replyToMessageId = normalizedReplyTo)))
         }
+    }
+
+    private fun MessageContent.toMediaCandidate(): QqBotBatchMediaCandidate? {
+        return when (this) {
+            is MessageContent.Image -> QqBotBatchMediaCandidate(
+                fileType = QqBotMediaFileType.IMAGE,
+                source = toMediaResourceSource(QqBotMediaFileType.IMAGE, image.uri),
+                fallbackText = fallbackText,
+            )
+            is MessageContent.Video -> QqBotBatchMediaCandidate(
+                fileType = QqBotMediaFileType.VIDEO,
+                source = toMediaResourceSource(QqBotMediaFileType.VIDEO, video.uri),
+                fallbackText = fallbackText,
+            )
+            is MessageContent.Audio -> QqBotBatchMediaCandidate(
+                fileType = QqBotMediaFileType.AUDIO,
+                source = toMediaResourceSource(QqBotMediaFileType.AUDIO, audio.uri),
+                fallbackText = fallbackText,
+            )
+            else -> null
+        }
+    }
+
+    private fun List<String>.joinNonBlankLines(): String {
+        return mapNotNull { it.trim().takeIf(String::isNotBlank) }
+            .joinToString(separator = "\n")
+            .trim()
     }
 
     private fun List<MessageBatch>.firstReplyMessageId(): String? {
@@ -183,6 +208,12 @@ internal object QqBotMessageMapper {
         return value.substring(BASE64_URI_PREFIX.length).trim().takeIf { it.isNotBlank() }
     }
 }
+
+private data class QqBotBatchMediaCandidate(
+    val fileType: QqBotMediaFileType,
+    val source: QqBotMediaResourceSource?,
+    val fallbackText: String,
+)
 
 internal object QqBotIncomingMessageMapper {
     private val json = Json {

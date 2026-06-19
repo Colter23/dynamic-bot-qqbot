@@ -86,6 +86,48 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
+    fun `同一批次中的图片和文本应合并为一条富媒体消息`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendMessage(
+            request = deliveryRequest(
+                target = TargetAddress.of("qq", TargetKind.GROUP, "group-openid"),
+                batches = listOf(
+                    MessageBatch(
+                        listOf(
+                            MessageContent.Image(
+                                fallbackText = "",
+                                image = MediaRef(
+                                    uri = "base64://aW1hZ2UtYnl0ZXM=",
+                                    kind = MediaKind.IMAGE,
+                                ),
+                            ),
+                            MessageContent.Text("\n优妮-KokoroUni 发布了新动态\nhttps://t.bilibili.com/1215152419671900183"),
+                        ),
+                    ),
+                    MessageBatch(listOf(MessageContent.Text("2026年06月18日 14:12:00"))),
+                ),
+            ),
+            routeId = "qqbot:qq:app-id",
+        )
+
+        val sent = assertIs<MessageSendResult.Sent>(result)
+        assertEquals(listOf("group-media-send-1", "group-send-1"), sent.sinkMessageIds)
+        assertEquals(
+            listOf(
+                "app-id:group-media:group-openid:IMAGE:aW1hZ2UtYnl0ZXM=:优妮-KokoroUni 发布了新动态\nhttps://t.bilibili.com/1215152419671900183",
+                "app-id:group:group-openid:2026年06月18日 14:12:00",
+            ),
+            gateway.sendCalls,
+        )
+        assertEquals(QQBOT_MEDIA_MSG_TYPE, gateway.sentRequests[0].msgType)
+        assertEquals(QQBOT_TEXT_MSG_TYPE, gateway.sentRequests[1].msgType)
+    }
+
+    @Test
     fun `普通发送本地图片时回退为文本`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway()

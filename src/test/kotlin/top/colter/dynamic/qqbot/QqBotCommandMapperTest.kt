@@ -35,7 +35,25 @@ class QqBotCommandMapperTest {
 
         requireNotNull(request)
         assertEquals("<@other-member-openid> /db help", request.rawText)
+        assertEquals("bot-app-id", request.context.botAccountId)
+        assertEquals("bot-app-id", request.context.target.accountId)
         assertEquals(setOf("other-member-openid"), request.context.mentionedAccountIds)
+    }
+
+    @Test
+    fun `群消息未 at 当前机器人时仍发布给主项目用于链接解析`() {
+        val request = QqBotCommandMapper.toCommandRequest(
+            sourcePlugin = QQBOT_PLUGIN_ID,
+            incoming = groupIncoming(
+                text = "https://t.bilibili.com/1215152419671900183",
+            ),
+        )
+
+        requireNotNull(request)
+        assertEquals("https://t.bilibili.com/1215152419671900183", request.rawText)
+        assertEquals("bot-app-id", request.context.botAccountId)
+        assertEquals("bot-app-id", request.context.target.accountId)
+        assertEquals(emptySet(), request.context.mentionedAccountIds)
     }
 
     @Test

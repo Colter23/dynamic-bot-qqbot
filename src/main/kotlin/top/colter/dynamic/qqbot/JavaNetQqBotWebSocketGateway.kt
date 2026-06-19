@@ -126,7 +126,10 @@ internal class JavaNetQqBotWebSocketGateway(
     }
 
     private fun handleDispatch(payload: String) {
-        val event = QqBotWebSocketProtocol.incomingEventOrNull(payload) ?: return
+        val event = QqBotWebSocketProtocol.incomingEventOrNull(
+            payload = payload,
+            botAccountId = config.appId.trim().takeIf { it.isNotBlank() },
+        ) ?: return
         incomingEventHandler?.invoke(event)
     }
 

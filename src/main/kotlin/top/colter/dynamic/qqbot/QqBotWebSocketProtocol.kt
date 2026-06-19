@@ -143,11 +143,11 @@ internal object QqBotWebSocketProtocol {
         )
     }
 
-    fun incomingEventOrNull(payload: String): QqBotIncomingEvent? {
+    fun incomingEventOrNull(payload: String, botAccountId: String? = null): QqBotIncomingEvent? {
         val frame = parseFrame(payload)
         if (frame.opcode != QqBotOpcode.DISPATCH) return null
         val type = frame.type?.takeIf { it.isNotBlank() } ?: return null
-        return QqBotIncomingEvent(type = type, rawPayload = frame.rawPayload)
+        return QqBotIncomingEvent(type = type, rawPayload = frame.rawPayload, botAccountId = botAccountId)
     }
 
     private fun systemProperty(name: String): String {

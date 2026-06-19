@@ -35,6 +35,7 @@ internal data class QqBotRuntimeAccount(
 internal data class QqBotIncomingEvent(
     val type: String,
     val rawPayload: String,
+    val botAccountId: String? = null,
 )
 
 internal class NoopQqBotGateway : QqBotGateway {

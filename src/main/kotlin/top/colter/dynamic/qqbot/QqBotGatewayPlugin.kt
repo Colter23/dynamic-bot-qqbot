@@ -1,5 +1,11 @@
 package top.colter.dynamic.qqbot
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import top.colter.dynamic.core.config.ConfigApplyResult
 import top.colter.dynamic.core.config.ConfigurablePlugin
 import top.colter.dynamic.core.config.loadOrCreate
@@ -32,6 +38,9 @@ public class QqBotGatewayPlugin :
     private var config: QqBotConfig = QqBotConfig()
     private var gateway: QqBotGateway = NoopQqBotGateway()
     private var incomingMessagePublisher: IncomingMessagePublisher = IncomingMessagePublisher { }
+    private lateinit var pluginScope: CoroutineScope
+    private var incomingScope: CoroutineScope? = null
+    private var incomingJob: Job? = null
     private var running: Boolean = false
 
     override val configId: String
@@ -50,6 +59,7 @@ public class QqBotGatewayPlugin :
     override suspend fun onLoad(context: PluginContext) {
         pluginId = context.pluginId
         incomingMessagePublisher = context.incomingMessagePublisher
+        pluginScope = context.scope
         config = context.configService.loadOrCreate(pluginId, QqBotConfigForm.migrations) { QqBotConfig() }
         QqBotConfigForm.validate(config)
         logger.info { "QQ 官方机器人配置已加载：pluginId=$pluginId enabled=${config.enabled}" }
@@ -65,7 +75,15 @@ public class QqBotGatewayPlugin :
         }
 
         val nextGateway = createQqBotGateway(config)
-        nextGateway.connect(::onIncomingEvent)
+        startIncomingScope()
+        runCatching {
+            nextGateway.connect(::onIncomingEvent)
+        }.onFailure { error ->
+            stopIncomingScope()
+            nextGateway.close()
+            logger.error(error) { "QQ 官方机器人 WebSocket 网关启动失败：appId=${config.appId}" }
+            throw error
+        }
         gateway = nextGateway
         running = true
         logger.info { "QQ 官方机器人 WebSocket 网关已启动：appId=${config.appId}" }
@@ -74,6 +92,7 @@ public class QqBotGatewayPlugin :
     override suspend fun onStop() {
         if (!running) return
         running = false
+        stopIncomingScope()
         gateway.close()
         gateway = NoopQqBotGateway()
         logger.info { "QQ 官方机器人插件已停止" }
@@ -163,10 +182,38 @@ public class QqBotGatewayPlugin :
 
     internal fun onIncomingEvent(event: QqBotIncomingEvent) {
         if (!running || !config.autoPublishIncoming) return
-        logger.debug { "收到 QQ 官方机器人入站事件占位：type=${event.type}" }
-        // TODO: 将 C2C_MESSAGE_CREATE / GROUP_AT_MESSAGE_CREATE 映射为 IncomingMessage 后发布。
-        @Suppress("UNUSED_VARIABLE")
-        val publisher = incomingMessagePublisher
+        val incoming = QqBotIncomingMessageMapper.toIncomingMessage(event)
+        if (incoming == null) {
+            logger.debug { "忽略 QQ 官方机器人入站事件：type=${event.type}" }
+            return
+        }
+
+        val scope = incomingScope ?: return
+        scope.launch {
+            if (!running) return@launch
+            runCatching {
+                incomingMessagePublisher.publish(incoming)
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                logger.warn(error) {
+                    "QQ 官方机器人入站消息提交失败：type=${event.type} messageId=${incoming.messageId.ifBlank { "-" }}"
+                }
+            }
+        }
+    }
+
+    private fun startIncomingScope() {
+        stopIncomingScope()
+        val parentJob = pluginScope.coroutineContext[Job]
+        val job = if (parentJob != null) SupervisorJob(parentJob) else SupervisorJob()
+        incomingJob = job
+        incomingScope = CoroutineScope(pluginScope.coroutineContext.minusKey(Job) + job)
+    }
+
+    private fun stopIncomingScope() {
+        incomingJob?.cancel("QQ official bot plugin stopped")
+        incomingJob = null
+        incomingScope = null
     }
 
     private fun QqBotRuntimeAccount.toRoute(

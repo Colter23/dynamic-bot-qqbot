@@ -6,6 +6,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import top.colter.dynamic.core.data.CommandTarget
 import top.colter.dynamic.core.data.DeliveryStatus
+import top.colter.dynamic.core.data.IncomingMessage
 import top.colter.dynamic.core.data.Message
 import top.colter.dynamic.core.data.MessageBatch
 import top.colter.dynamic.core.data.MessageContent
@@ -60,6 +61,39 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
+    fun `sendCommandResult uses trace reply context as official passive reply id`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        val replyContexts = QqBotReplyContextStore(nowMillis = { 1_000L })
+        replyContexts.remember(
+            traceId = "trace-id",
+            incoming = IncomingMessage(
+                platformId = QQBOT_PLATFORM_ID,
+                target = TargetAddress.of("qq", TargetKind.GROUP, "group-openid", accountId = "app-id"),
+                senderId = "member-openid",
+                botAccountId = "app-id",
+                messageId = "group-msg-1",
+                text = "@bot ping",
+            ),
+        )
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("replyContextStore", replyContexts)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendCommandResult(
+            request = CommandResultSendRequest(
+                target = CommandTarget(TargetAddress.of("qq", TargetKind.GROUP, "group-openid"), senderId = "member-openid"),
+                chain = listOf(MessageBatch(listOf(MessageContent.Text("pong")))),
+                inReplyTo = "trace-id",
+            ),
+            routeId = "qqbot:qq:app-id",
+        )
+
+        assertIs<MessageSendResult.Sent>(result)
+        assertEquals("group-msg-1", gateway.sentRequests.single().replyToMessageId)
+    }
+
+    @Test
     fun `sendMessage rejects unavailable account without sending`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway(state = MessageSinkRouteState.UNAVAILABLE)
@@ -106,6 +140,7 @@ class QqBotGatewayPluginSendTest {
         private val state: MessageSinkRouteState = MessageSinkRouteState.READY,
     ) : QqBotGateway {
         val sendCalls: MutableList<String> = mutableListOf()
+        val sentRequests: MutableList<QqBotSendRequest> = mutableListOf()
 
         override suspend fun connect(onIncomingEvent: (QqBotIncomingEvent) -> Unit) {
         }
@@ -119,6 +154,7 @@ class QqBotGatewayPluginSendTest {
             openid: String,
             request: QqBotSendRequest,
         ): QqBotSendReceipt {
+            sentRequests += request
             sendCalls += "$accountId:user:$openid:${request.content}"
             return QqBotSendReceipt(messageId = "user-send-1")
         }
@@ -128,6 +164,7 @@ class QqBotGatewayPluginSendTest {
             groupOpenid: String,
             request: QqBotSendRequest,
         ): QqBotSendReceipt {
+            sentRequests += request
             sendCalls += "$accountId:group:$groupOpenid:${request.content}"
             return QqBotSendReceipt(messageId = "group-send-1")
         }

@@ -13,7 +13,11 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
+import top.colter.dynamic.core.command.CommandPublishRequest
+import top.colter.dynamic.core.command.CommandPublisher
 import top.colter.dynamic.core.data.IncomingMessage
+import top.colter.dynamic.core.data.TargetKind
 import top.colter.dynamic.core.plugin.IncomingMessagePublisher
 
 class QqBotGatewayPluginIncomingTest {
@@ -24,11 +28,14 @@ class QqBotGatewayPluginIncomingTest {
         val publishStarted = CompletableDeferred<Unit>()
         val releasePublish = CompletableDeferred<Unit>()
         val published = CompletableDeferred<IncomingMessage>()
-        plugin.prepareIncomingTest(scope) { message ->
-            publishStarted.complete(Unit)
-            releasePublish.await()
-            published.complete(message)
-        }
+        plugin.prepareIncomingTest(
+            scope = scope,
+            publishIncoming = { message ->
+                publishStarted.complete(Unit)
+                releasePublish.await()
+                published.complete(message)
+            },
+        )
 
         try {
             plugin.setPrivate("running", true)
@@ -53,7 +60,10 @@ class QqBotGatewayPluginIncomingTest {
         val plugin = QqBotGatewayPlugin()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val published = CompletableDeferred<IncomingMessage>()
-        plugin.prepareIncomingTest(scope) { message -> published.complete(message) }
+        plugin.prepareIncomingTest(
+            scope = scope,
+            publishIncoming = { message -> published.complete(message) },
+        )
 
         try {
             plugin.setPrivate("running", true)
@@ -69,11 +79,75 @@ class QqBotGatewayPluginIncomingTest {
     }
 
     @Test
+    fun `incoming event should publish command request`() = runBlocking {
+        val plugin = QqBotGatewayPlugin()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val publishedIncoming = CompletableDeferred<IncomingMessage>()
+        val publishedCommand = CompletableDeferred<CommandPublishRequest>()
+        plugin.prepareIncomingTest(
+            scope = scope,
+            publishIncoming = { message -> publishedIncoming.complete(message) },
+            publishCommand = { request -> publishedCommand.complete(request) },
+        )
+
+        try {
+            plugin.setPrivate("running", true)
+
+            plugin.invokeIncoming(groupEvent())
+
+            val incoming = withTimeout(500) { publishedIncoming.await() }
+            val command = withTimeout(500) { publishedCommand.await() }
+            assertEquals("group-msg-1", incoming.messageId)
+            assertEquals(QQBOT_PLUGIN_ID, command.sourcePlugin)
+            assertEquals("@bot ping", command.rawText)
+            assertTrue(command.traceId.isNotBlank())
+            assertEquals("qq", command.context.platform)
+            assertEquals(TargetKind.GROUP, command.context.chatType)
+            assertEquals("group-openid", command.context.chatId)
+            assertEquals("member-openid", command.context.senderId)
+            assertEquals("bot-app-id", command.context.botAccountId)
+            assertEquals("bot-app-id", command.context.target.accountId)
+            assertEquals(setOf("bot-app-id"), command.context.mentionedAccountIds)
+        } finally {
+            plugin.callPrivate("stopIncomingScope")
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `blank incoming text should not publish command request`() = runBlocking {
+        val plugin = QqBotGatewayPlugin()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val publishedIncoming = CompletableDeferred<IncomingMessage>()
+        val publishedCommand = CompletableDeferred<CommandPublishRequest>()
+        plugin.prepareIncomingTest(
+            scope = scope,
+            publishIncoming = { message -> publishedIncoming.complete(message) },
+            publishCommand = { request -> publishedCommand.complete(request) },
+        )
+
+        try {
+            plugin.setPrivate("running", true)
+
+            plugin.invokeIncoming(c2cEvent(content = "   "))
+
+            assertEquals("", withTimeout(500) { publishedIncoming.await() }.text)
+            assertNull(withTimeoutOrNull(200) { publishedCommand.await() })
+        } finally {
+            plugin.callPrivate("stopIncomingScope")
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun `unsupported incoming event should be ignored`() = runBlocking {
         val plugin = QqBotGatewayPlugin()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val published = CompletableDeferred<IncomingMessage>()
-        plugin.prepareIncomingTest(scope) { message -> published.complete(message) }
+        plugin.prepareIncomingTest(
+            scope = scope,
+            publishIncoming = { message -> published.complete(message) },
+        )
 
         try {
             plugin.setPrivate("running", true)
@@ -95,15 +169,17 @@ class QqBotGatewayPluginIncomingTest {
     private fun QqBotGatewayPlugin.prepareIncomingTest(
         scope: CoroutineScope,
         publishIncoming: suspend (IncomingMessage) -> Unit,
+        publishCommand: suspend (CommandPublishRequest) -> Unit = {},
     ) {
         setPrivate("pluginId", QQBOT_PLUGIN_ID)
         setPrivate("config", QqBotConfig())
         setPrivate("pluginScope", scope)
         setPrivate("incomingMessagePublisher", IncomingMessagePublisher { message -> publishIncoming(message) })
+        setPrivate("commandPublisher", CommandPublisher { request -> publishCommand(request) })
         callPrivate("startIncomingScope")
     }
 
-    private fun c2cEvent(): QqBotIncomingEvent {
+    private fun c2cEvent(content: String = "hello"): QqBotIncomingEvent {
         return QqBotIncomingEvent(
             type = QQBOT_C2C_MESSAGE_CREATE,
             botAccountId = "bot-app-id",
@@ -115,7 +191,27 @@ class QqBotGatewayPluginIncomingTest {
                   "d":{
                     "id":"msg-1",
                     "author":{"user_openid":"user-openid"},
-                    "content":"hello"
+                    "content":"$content"
+                  }
+                }
+            """.trimIndent(),
+        )
+    }
+
+    private fun groupEvent(): QqBotIncomingEvent {
+        return QqBotIncomingEvent(
+            type = QQBOT_GROUP_AT_MESSAGE_CREATE,
+            botAccountId = "bot-app-id",
+            rawPayload = """
+                {
+                  "op":0,
+                  "s":2,
+                  "t":"GROUP_AT_MESSAGE_CREATE",
+                  "d":{
+                    "id":"group-msg-1",
+                    "group_openid":"group-openid",
+                    "author":{"member_openid":"member-openid"},
+                    "content":"@bot ping"
                   }
                 }
             """.trimIndent(),

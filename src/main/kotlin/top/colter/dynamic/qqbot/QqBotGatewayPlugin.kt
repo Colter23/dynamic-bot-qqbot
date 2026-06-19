@@ -6,6 +6,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import top.colter.dynamic.core.command.CommandPublisher
 import top.colter.dynamic.core.config.ConfigApplyResult
 import top.colter.dynamic.core.config.ConfigurablePlugin
 import top.colter.dynamic.core.config.loadOrCreate
@@ -37,7 +38,9 @@ public class QqBotGatewayPlugin :
     private var pluginId: String = QQBOT_PLUGIN_ID
     private var config: QqBotConfig = QqBotConfig()
     private var gateway: QqBotGateway = NoopQqBotGateway()
+    private var commandPublisher: CommandPublisher = CommandPublisher { }
     private var incomingMessagePublisher: IncomingMessagePublisher = IncomingMessagePublisher { }
+    private var replyContextStore: QqBotReplyContextStore = QqBotReplyContextStore()
     private lateinit var pluginScope: CoroutineScope
     private var incomingScope: CoroutineScope? = null
     private var incomingJob: Job? = null
@@ -58,6 +61,7 @@ public class QqBotGatewayPlugin :
 
     override suspend fun onLoad(context: PluginContext) {
         pluginId = context.pluginId
+        commandPublisher = context.commandPublisher
         incomingMessagePublisher = context.incomingMessagePublisher
         pluginScope = context.scope
         config = context.configService.loadOrCreate(pluginId, QqBotConfigForm.migrations) { QqBotConfig() }
@@ -93,6 +97,7 @@ public class QqBotGatewayPlugin :
         if (!running) return
         running = false
         stopIncomingScope()
+        replyContextStore.clear()
         gateway.close()
         gateway = NoopQqBotGateway()
         logger.info { "QQ 官方机器人插件已停止" }
@@ -182,6 +187,11 @@ public class QqBotGatewayPlugin :
         if (!isAccountReady(accountId)) {
             return MessageSendResult.failed("QQ 官方机器人账号不可用：$accountId")
         }
+        val replyToMessageId = replyContextStore.findReplyMessageId(
+            traceId = request.inReplyTo,
+            target = request.target.address,
+            accountId = accountId,
+        )
         return when (val target = QqBotTarget.fromAddress(request.target.address)) {
             is QqBotTarget.User -> sendWithReceipt(
                 routeId = routeId,
@@ -191,7 +201,10 @@ public class QqBotGatewayPlugin :
                 gateway.sendUserMessage(
                     accountId = accountId,
                     openid = target.openid,
-                    request = QqBotMessageMapper.toTextRequest(request.chain),
+                    request = QqBotMessageMapper.toTextRequest(
+                        batches = request.chain,
+                        replyToMessageId = replyToMessageId,
+                    ),
                 )
             }
             is QqBotTarget.Group -> sendWithReceipt(
@@ -202,7 +215,10 @@ public class QqBotGatewayPlugin :
                 gateway.sendGroupMessage(
                     accountId = accountId,
                     groupOpenid = target.groupOpenid,
-                    request = QqBotMessageMapper.toTextRequest(request.chain),
+                    request = QqBotMessageMapper.toTextRequest(
+                        batches = request.chain,
+                        replyToMessageId = replyToMessageId,
+                    ),
                 )
             }
             is QqBotTarget.Unsupported -> MessageSendResult.failed("目标类型不受支持", retryable = false)
@@ -237,7 +253,14 @@ public class QqBotGatewayPlugin :
             return
         }
 
+        val commandRequest = QqBotCommandMapper.toCommandRequest(
+            sourcePlugin = pluginId,
+            incoming = incoming,
+        )
         val scope = incomingScope ?: return
+        if (commandRequest != null) {
+            replyContextStore.remember(commandRequest.traceId, incoming)
+        }
         scope.launch {
             if (!running) return@launch
             runCatching {
@@ -246,6 +269,15 @@ public class QqBotGatewayPlugin :
                 if (error is CancellationException) throw error
                 logger.warn(error) {
                     "QQ 官方机器人入站消息提交失败：type=${event.type} messageId=${incoming.messageId.ifBlank { "-" }}"
+                }
+            }
+            if (commandRequest != null) {
+                try {
+                    commandPublisher.publish(commandRequest)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    logger.warn(error) { "QQ official bot command publish failed: traceId=${commandRequest.traceId}" }
                 }
             }
         }

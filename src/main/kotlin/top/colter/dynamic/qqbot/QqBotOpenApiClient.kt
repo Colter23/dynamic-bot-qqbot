@@ -129,6 +129,26 @@ internal class QqBotOpenApiClient(
         return parseSendReceipt("发送 QQ 官方机器人群聊消息", response)
     }
 
+    fun prepareUserMedia(openid: String, request: QqBotMediaPrepareRequest): QqBotMediaResource {
+        val response = transport.postJson(
+            url = "$OPEN_API_BASE_URL/v2/users/${openid.pathSegment()}/files",
+            headers = authorizedHeaders(),
+            body = encodeMediaPrepareRequest(request),
+        )
+        ensureSuccess("登记 QQ 官方机器人单聊富媒体资源", response)
+        return parseMediaResource("登记 QQ 官方机器人单聊富媒体资源", response)
+    }
+
+    fun prepareGroupMedia(groupOpenid: String, request: QqBotMediaPrepareRequest): QqBotMediaResource {
+        val response = transport.postJson(
+            url = "$OPEN_API_BASE_URL/v2/groups/${groupOpenid.pathSegment()}/files",
+            headers = authorizedHeaders(),
+            body = encodeMediaPrepareRequest(request),
+        )
+        ensureSuccess("登记 QQ 官方机器人群聊富媒体资源", response)
+        return parseMediaResource("登记 QQ 官方机器人群聊富媒体资源", response)
+    }
+
     fun recallUserMessage(openid: String, messageId: String) {
         val response = transport.delete(
             url = "$OPEN_API_BASE_URL/v2/users/${openid.pathSegment()}/messages/${messageId.pathSegment()}",
@@ -199,15 +219,42 @@ internal class QqBotOpenApiClient(
     private fun encodeSendRequest(request: QqBotSendRequest): String {
         require(request.msgType >= 0) { "QQ 官方机器人消息类型不能为负数" }
         require(request.msgSeq >= 1) { "QQ 官方机器人 msg_seq 必须大于 0" }
+        val mediaFileInfo = request.mediaFileInfo?.trim()?.takeIf { it.isNotBlank() }
+        require(request.msgType != QQBOT_MEDIA_MSG_TYPE || mediaFileInfo != null) {
+            "QQ 官方机器人富媒体消息必须包含 file_info"
+        }
+        require(mediaFileInfo == null || request.msgType == QQBOT_MEDIA_MSG_TYPE) {
+            "QQ 官方机器人只有富媒体消息可以携带 file_info"
+        }
         val replyTo = request.replyToMessageId?.trim()?.takeIf { it.isNotBlank() }
         return json.encodeToString(
             buildJsonObject {
                 put("content", JsonPrimitive(request.content.ifBlank { " " }))
                 put("msg_type", JsonPrimitive(request.msgType))
+                if (mediaFileInfo != null) {
+                    put(
+                        "media",
+                        buildJsonObject {
+                            put("file_info", JsonPrimitive(mediaFileInfo))
+                        },
+                    )
+                }
                 if (replyTo != null) {
                     put("msg_id", JsonPrimitive(replyTo))
                     put("msg_seq", JsonPrimitive(request.msgSeq))
                 }
+            },
+        )
+    }
+
+    private fun encodeMediaPrepareRequest(request: QqBotMediaPrepareRequest): String {
+        val url = request.url.trim()
+        require(url.isNotBlank()) { "QQ 官方机器人富媒体资源 URL 不能为空" }
+        return json.encodeToString(
+            buildJsonObject {
+                put("file_type", JsonPrimitive(request.fileType.code))
+                put("url", JsonPrimitive(url))
+                put("srv_send_msg", JsonPrimitive(request.srvSendMsg))
             },
         )
     }
@@ -225,6 +272,25 @@ internal class QqBotOpenApiClient(
         }
         return QqBotSendReceipt(
             messageId = messageId,
+            rawPayload = response.body,
+        )
+    }
+
+    private fun parseMediaResource(action: String, response: QqBotHttpResponse): QqBotMediaResource {
+        val root = parseResponseObject(action, response.body)
+        val fileInfo = root["file_info"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        if (fileInfo.isBlank()) {
+            throw QqBotOpenApiException(
+                action = action,
+                statusCode = response.statusCode,
+                message = "响应缺少 file_info",
+                body = response.body,
+            )
+        }
+        return QqBotMediaResource(
+            fileInfo = fileInfo,
+            fileUuid = root["file_uuid"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotBlank() },
+            ttlSeconds = root["ttl"]?.jsonPrimitive?.longOrNull,
             rawPayload = response.body,
         )
     }
@@ -264,6 +330,19 @@ internal data class QqBotSessionStartLimit(
     val remaining: Int? = null,
     val resetAfterMillis: Long? = null,
     val maxConcurrency: Int? = null,
+)
+
+internal data class QqBotMediaPrepareRequest(
+    val fileType: QqBotMediaFileType,
+    val url: String,
+    val srvSendMsg: Boolean = false,
+)
+
+internal data class QqBotMediaResource(
+    val fileInfo: String,
+    val fileUuid: String? = null,
+    val ttlSeconds: Long? = null,
+    val rawPayload: String = "",
 )
 
 internal class QqBotOpenApiException(

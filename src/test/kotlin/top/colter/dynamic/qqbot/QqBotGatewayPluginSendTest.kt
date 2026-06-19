@@ -7,6 +7,8 @@ import kotlin.test.assertIs
 import top.colter.dynamic.core.data.CommandTarget
 import top.colter.dynamic.core.data.DeliveryStatus
 import top.colter.dynamic.core.data.IncomingMessage
+import top.colter.dynamic.core.data.MediaKind
+import top.colter.dynamic.core.data.MediaRef
 import top.colter.dynamic.core.data.Message
 import top.colter.dynamic.core.data.MessageBatch
 import top.colter.dynamic.core.data.MessageContent
@@ -39,6 +41,72 @@ class QqBotGatewayPluginSendTest {
         assertEquals("app-id", sent.sinkAccountId)
         assertEquals("qqbot", sent.sinkTransportId)
         assertEquals(listOf("app-id:user:user-openid:hello"), gateway.sendCalls)
+    }
+
+    @Test
+    fun `普通发送群聊图片 URL 走富媒体消息`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendMessage(
+            request = deliveryRequest(
+                target = TargetAddress.of("qq", TargetKind.GROUP, "group-openid"),
+                batches = listOf(
+                    MessageBatch(listOf(MessageContent.Text("先看图"))),
+                    MessageBatch(
+                        listOf(
+                            MessageContent.Image(
+                                fallbackText = "图片说明",
+                                image = MediaRef(uri = "https://example.com/a.png", kind = MediaKind.IMAGE),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            routeId = "qqbot:qq:app-id",
+        )
+
+        val sent = assertIs<MessageSendResult.Sent>(result)
+        assertEquals(listOf("group-send-1", "group-media-send-1"), sent.sinkMessageIds)
+        assertEquals(
+            listOf(
+                "app-id:group:group-openid:先看图",
+                "app-id:group-media:group-openid:IMAGE:https://example.com/a.png:图片说明",
+            ),
+            gateway.sendCalls,
+        )
+        assertEquals(QQBOT_MEDIA_MSG_TYPE, gateway.sentRequests.last().msgType)
+    }
+
+    @Test
+    fun `普通发送本地图片时回退为文本`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendMessage(
+            request = deliveryRequest(
+                target = TargetAddress.of("qq", TargetKind.USER, "user-openid"),
+                batches = listOf(
+                    MessageBatch(
+                        listOf(
+                            MessageContent.Image(
+                                fallbackText = "本地图片",
+                                image = MediaRef(uri = "file:/tmp/a.png", kind = MediaKind.IMAGE),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            routeId = "qqbot:qq:app-id",
+        )
+
+        assertIs<MessageSendResult.Sent>(result)
+        assertEquals(listOf("app-id:user:user-openid:本地图片"), gateway.sendCalls)
+        assertEquals(emptyList(), gateway.mediaCalls)
     }
 
     @Test
@@ -196,11 +264,18 @@ class QqBotGatewayPluginSendTest {
     }
 
     private fun deliveryRequest(target: TargetAddress, text: String): MessageDeliveryRequest {
+        return deliveryRequest(
+            target = target,
+            batches = listOf(MessageBatch(listOf(MessageContent.Text(text)))),
+        )
+    }
+
+    private fun deliveryRequest(target: TargetAddress, batches: List<MessageBatch>): MessageDeliveryRequest {
         val message = Message(
             id = "message-1",
             time = 1,
             targets = listOf(target),
-            batches = listOf(MessageBatch(listOf(MessageContent.Text(text)))),
+            batches = batches,
         )
         return MessageDeliveryRequest(
             delivery = MessageDelivery(
@@ -221,6 +296,7 @@ class QqBotGatewayPluginSendTest {
     ) : QqBotGateway {
         val sendCalls: MutableList<String> = mutableListOf()
         val sentRequests: MutableList<QqBotSendRequest> = mutableListOf()
+        val mediaCalls: MutableList<QqBotUrlMedia> = mutableListOf()
         val recallCalls: MutableList<String> = mutableListOf()
 
         override suspend fun connect(onIncomingEvent: (QqBotIncomingEvent) -> Unit) {
@@ -248,6 +324,30 @@ class QqBotGatewayPluginSendTest {
             sentRequests += request
             sendCalls += "$accountId:group:$groupOpenid:${request.content}"
             return QqBotSendReceipt(messageId = "group-send-1")
+        }
+
+        override suspend fun sendUserMediaMessage(
+            accountId: String,
+            openid: String,
+            media: QqBotUrlMedia,
+            request: QqBotSendRequest,
+        ): QqBotSendReceipt {
+            sentRequests += request
+            mediaCalls += media
+            sendCalls += "$accountId:user-media:$openid:${media.fileType}:${media.url}:${request.content}"
+            return QqBotSendReceipt(messageId = "user-media-send-1")
+        }
+
+        override suspend fun sendGroupMediaMessage(
+            accountId: String,
+            groupOpenid: String,
+            media: QqBotUrlMedia,
+            request: QqBotSendRequest,
+        ): QqBotSendReceipt {
+            sentRequests += request
+            mediaCalls += media
+            sendCalls += "$accountId:group-media:$groupOpenid:${media.fileType}:${media.url}:${request.content}"
+            return QqBotSendReceipt(messageId = "group-media-send-1")
         }
 
         override suspend fun recallUserMessage(accountId: String, openid: String, messageId: String) {

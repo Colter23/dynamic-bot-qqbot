@@ -1,6 +1,7 @@
 package top.colter.dynamic.qqbot
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -208,6 +209,76 @@ class QqBotOpenApiClientTest {
         assertEquals("group hello", body.getValue("content").jsonPrimitive.content)
         assertEquals(false, "msg_id" in body)
         assertEquals(false, "msg_seq" in body)
+    }
+
+    @Test
+    fun `单聊富媒体资源登记提交官方文件负载`() {
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}"""),
+                    QqBotHttpResponse(200, """{"file_uuid":"uuid-1","file_info":"file-info-1","ttl":3600}"""),
+                ),
+            ),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        val resource = client.prepareUserMedia(
+            openid = "user/open id",
+            request = QqBotMediaPrepareRequest(
+                fileType = QqBotMediaFileType.IMAGE,
+                url = " https://example.com/a.png ",
+            ),
+        )
+
+        assertEquals("file-info-1", resource.fileInfo)
+        assertEquals("uuid-1", resource.fileUuid)
+        assertEquals(3600L, resource.ttlSeconds)
+        val sent = transport.posts.last()
+        assertEquals("https://api.sgroup.qq.com/v2/users/user%2Fopen%20id/files", sent.url)
+        assertEquals("QQBot token-a", sent.headers.getValue("Authorization"))
+        val body = Json.parseToJsonElement(sent.body).jsonObject
+        assertEquals(1, body.getValue("file_type").jsonPrimitive.int)
+        assertEquals("https://example.com/a.png", body.getValue("url").jsonPrimitive.content)
+        assertEquals(false, body.getValue("srv_send_msg").jsonPrimitive.boolean)
+    }
+
+    @Test
+    fun `群聊富媒体消息发送提交 media file_info`() {
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}"""),
+                    QqBotHttpResponse(200, """{"id":"media-send-1"}"""),
+                ),
+            ),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        val receipt = client.sendGroupMessage(
+            groupOpenid = "group-openid",
+            request = QqBotSendRequest(
+                content = "",
+                msgType = QQBOT_MEDIA_MSG_TYPE,
+                mediaFileInfo = " file-info-1 ",
+                replyToMessageId = "source-msg",
+                msgSeq = 2,
+            ),
+        )
+
+        assertEquals("media-send-1", receipt.messageId)
+        val body = Json.parseToJsonElement(transport.posts.last().body).jsonObject
+        assertEquals(" ", body.getValue("content").jsonPrimitive.content)
+        assertEquals(7, body.getValue("msg_type").jsonPrimitive.int)
+        assertEquals("file-info-1", body.getValue("media").jsonObject.getValue("file_info").jsonPrimitive.content)
+        assertEquals("source-msg", body.getValue("msg_id").jsonPrimitive.content)
+        assertEquals(2, body.getValue("msg_seq").jsonPrimitive.int)
     }
 
     @Test

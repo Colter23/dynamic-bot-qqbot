@@ -102,6 +102,34 @@ internal class JavaNetQqBotWebSocketGateway(
         openApiClient.sendGroupMessage(groupOpenid, request)
     }
 
+    override suspend fun sendUserMediaMessage(
+        accountId: String,
+        openid: String,
+        media: QqBotUrlMedia,
+        request: QqBotSendRequest,
+    ): QqBotSendReceipt = withContext(Dispatchers.IO) {
+        requireAccount(accountId)
+        val resource = openApiClient.prepareUserMedia(
+            openid = openid,
+            request = QqBotMediaPrepareRequest(fileType = media.fileType, url = media.url),
+        )
+        openApiClient.sendUserMessage(openid, request.copy(mediaFileInfo = resource.fileInfo))
+    }
+
+    override suspend fun sendGroupMediaMessage(
+        accountId: String,
+        groupOpenid: String,
+        media: QqBotUrlMedia,
+        request: QqBotSendRequest,
+    ): QqBotSendReceipt = withContext(Dispatchers.IO) {
+        requireAccount(accountId)
+        val resource = openApiClient.prepareGroupMedia(
+            groupOpenid = groupOpenid,
+            request = QqBotMediaPrepareRequest(fileType = media.fileType, url = media.url),
+        )
+        openApiClient.sendGroupMessage(groupOpenid, request.copy(mediaFileInfo = resource.fileInfo))
+    }
+
     override suspend fun recallUserMessage(accountId: String, openid: String, messageId: String) {
         withContext(Dispatchers.IO) {
             requireAccount(accountId)

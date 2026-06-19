@@ -147,28 +147,47 @@ public class QqBotGatewayPlugin :
             return MessageSendResult.failed("QQ 官方机器人账号不可用：$accountId")
         }
 
+        val plan = QqBotMessageMapper.toSendPlan(request.batches)
         return when (val target = QqBotTarget.fromAddress(request.target)) {
-            is QqBotTarget.User -> sendWithReceipt(
+            is QqBotTarget.User -> sendPlanWithReceipt(
                 routeId = routeId,
                 accountId = accountId,
                 failureLabel = "QQ 官方机器人单聊消息发送失败",
-            ) {
-                gateway.sendUserMessage(
-                    accountId = accountId,
-                    openid = target.openid,
-                    request = QqBotMessageMapper.toTextRequest(request.batches),
-                )
+                plan = plan,
+            ) { item ->
+                when (item) {
+                    is QqBotSendPlanItem.Text -> gateway.sendUserMessage(
+                        accountId = accountId,
+                        openid = target.openid,
+                        request = item.request,
+                    )
+                    is QqBotSendPlanItem.Media -> gateway.sendUserMediaMessage(
+                        accountId = accountId,
+                        openid = target.openid,
+                        media = item.media,
+                        request = item.request,
+                    )
+                }
             }
-            is QqBotTarget.Group -> sendWithReceipt(
+            is QqBotTarget.Group -> sendPlanWithReceipt(
                 routeId = routeId,
                 accountId = accountId,
                 failureLabel = "QQ 官方机器人群聊消息发送失败",
-            ) {
-                gateway.sendGroupMessage(
-                    accountId = accountId,
-                    groupOpenid = target.groupOpenid,
-                    request = QqBotMessageMapper.toTextRequest(request.batches),
-                )
+                plan = plan,
+            ) { item ->
+                when (item) {
+                    is QqBotSendPlanItem.Text -> gateway.sendGroupMessage(
+                        accountId = accountId,
+                        groupOpenid = target.groupOpenid,
+                        request = item.request,
+                    )
+                    is QqBotSendPlanItem.Media -> gateway.sendGroupMediaMessage(
+                        accountId = accountId,
+                        groupOpenid = target.groupOpenid,
+                        media = item.media,
+                        request = item.request,
+                    )
+                }
             }
             is QqBotTarget.Unsupported -> MessageSendResult.failed("目标类型不受支持", retryable = false)
         }
@@ -192,34 +211,50 @@ public class QqBotGatewayPlugin :
             target = request.target.address,
             accountId = accountId,
         )
+        val plan = QqBotMessageMapper.toSendPlan(
+            batches = request.chain,
+            replyToMessageId = replyToMessageId,
+        )
         return when (val target = QqBotTarget.fromAddress(request.target.address)) {
-            is QqBotTarget.User -> sendWithReceipt(
+            is QqBotTarget.User -> sendPlanWithReceipt(
                 routeId = routeId,
                 accountId = accountId,
                 failureLabel = "QQ 官方机器人命令结果发送失败",
-            ) {
-                gateway.sendUserMessage(
-                    accountId = accountId,
-                    openid = target.openid,
-                    request = QqBotMessageMapper.toTextRequest(
-                        batches = request.chain,
-                        replyToMessageId = replyToMessageId,
-                    ),
-                )
+                plan = plan,
+            ) { item ->
+                when (item) {
+                    is QqBotSendPlanItem.Text -> gateway.sendUserMessage(
+                        accountId = accountId,
+                        openid = target.openid,
+                        request = item.request,
+                    )
+                    is QqBotSendPlanItem.Media -> gateway.sendUserMediaMessage(
+                        accountId = accountId,
+                        openid = target.openid,
+                        media = item.media,
+                        request = item.request,
+                    )
+                }
             }
-            is QqBotTarget.Group -> sendWithReceipt(
+            is QqBotTarget.Group -> sendPlanWithReceipt(
                 routeId = routeId,
                 accountId = accountId,
                 failureLabel = "QQ 官方机器人命令结果发送失败",
-            ) {
-                gateway.sendGroupMessage(
-                    accountId = accountId,
-                    groupOpenid = target.groupOpenid,
-                    request = QqBotMessageMapper.toTextRequest(
-                        batches = request.chain,
-                        replyToMessageId = replyToMessageId,
-                    ),
-                )
+                plan = plan,
+            ) { item ->
+                when (item) {
+                    is QqBotSendPlanItem.Text -> gateway.sendGroupMessage(
+                        accountId = accountId,
+                        groupOpenid = target.groupOpenid,
+                        request = item.request,
+                    )
+                    is QqBotSendPlanItem.Media -> gateway.sendGroupMediaMessage(
+                        accountId = accountId,
+                        groupOpenid = target.groupOpenid,
+                        media = item.media,
+                        request = item.request,
+                    )
+                }
             }
             is QqBotTarget.Unsupported -> MessageSendResult.failed("目标类型不受支持", retryable = false)
         }
@@ -342,25 +377,31 @@ public class QqBotGatewayPlugin :
         }
     }
 
-    private suspend fun sendWithReceipt(
+    private suspend fun sendPlanWithReceipt(
         routeId: String,
         accountId: String,
         failureLabel: String,
-        send: suspend () -> QqBotSendReceipt,
+        plan: List<QqBotSendPlanItem>,
+        send: suspend (QqBotSendPlanItem) -> QqBotSendReceipt,
     ): MessageSendResult {
-        return runCatching { send() }
-            .fold(
-                onSuccess = { receipt ->
-                    MessageSendResult.sent(
-                        sinkMessageId = receipt.messageId,
-                        sinkRouteId = routeId,
-                        sinkAccountId = accountId,
-                        sinkTransportId = transportId,
-                        sinkMessageIds = listOf(receipt.messageId),
+        val receipts = mutableListOf<QqBotSendReceipt>()
+        plan.forEach { item ->
+            val receipt = runCatching { send(item) }
+                .getOrElse { error ->
+                    return MessageSendResult.failed(
+                        reason = error.message ?: failureLabel,
+                        partialSent = receipts.isNotEmpty(),
                     )
-                },
-                onFailure = { error -> MessageSendResult.failed(error.message ?: failureLabel) },
-            )
+                }
+            receipts += receipt
+        }
+        return MessageSendResult.sent(
+            sinkMessageId = receipts.firstOrNull()?.messageId,
+            sinkRouteId = routeId,
+            sinkAccountId = accountId,
+            sinkTransportId = transportId,
+            sinkMessageIds = receipts.map { it.messageId },
+        )
     }
 
     private suspend fun recallWithResult(

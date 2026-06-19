@@ -284,6 +284,42 @@ class JavaNetQqBotWebSocketGatewayTest {
     }
 
     @Test
+    fun `就绪网关先登记富媒体再发送群聊媒体消息`() = runTest {
+        val connector = FakeQqBotWebSocketConnector()
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}"""),
+                    QqBotHttpResponse(200, """{"file_info":"file-info-1","ttl":3600}"""),
+                    QqBotHttpResponse(200, """{"id":"group-media-send-1"}"""),
+                ),
+            ),
+            getResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"url":"wss://api.sgroup.qq.com/websocket","shards":1}""")),
+            ),
+        )
+        val gateway = testGateway(connector = connector, transport = transport)
+
+        gateway.connect { }
+        connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        connector.listener.onText("""{"op":0,"s":88,"t":"READY","d":{"session_id":"session-a"}}""")
+
+        val receipt = gateway.sendGroupMediaMessage(
+            accountId = "app-id",
+            groupOpenid = "group-openid",
+            media = QqBotUrlMedia(QqBotMediaFileType.IMAGE, "https://example.com/a.png"),
+            request = QqBotSendRequest(content = "图片说明", msgType = QQBOT_MEDIA_MSG_TYPE),
+        )
+
+        assertEquals("group-media-send-1", receipt.messageId)
+        assertEquals("https://api.sgroup.qq.com/v2/groups/group-openid/files", transport.posts[1].url)
+        assertEquals("https://api.sgroup.qq.com/v2/groups/group-openid/messages", transport.posts[2].url)
+        val sendBody = Json.parseToJsonElement(transport.posts[2].body).jsonObject
+        assertEquals(7, sendBody.getValue("msg_type").jsonPrimitive.int)
+        assertEquals("file-info-1", sendBody.getValue("media").jsonObject.getValue("file_info").jsonPrimitive.content)
+    }
+
+    @Test
     fun `就绪网关通过 OpenAPI 撤回单聊和群聊消息`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val transport = FakeQqBotHttpTransport(

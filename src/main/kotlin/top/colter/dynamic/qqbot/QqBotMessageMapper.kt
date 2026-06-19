@@ -1,5 +1,6 @@
 package top.colter.dynamic.qqbot
 
+import java.net.URI
 import java.time.Instant
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -20,12 +21,37 @@ internal data class QqBotSendRequest(
     val msgType: Int = 0,
     val replyToMessageId: String? = null,
     val msgSeq: Int = 1,
+    val mediaFileInfo: String? = null,
 )
 
 internal data class QqBotSendReceipt(
     val messageId: String,
     val rawPayload: String = "",
 )
+
+internal enum class QqBotMediaFileType(val code: Int, val label: String) {
+    IMAGE(1, "图片"),
+    VIDEO(2, "视频"),
+    AUDIO(3, "语音"),
+}
+
+internal data class QqBotUrlMedia(
+    val fileType: QqBotMediaFileType,
+    val url: String,
+)
+
+internal sealed interface QqBotSendPlanItem {
+    val request: QqBotSendRequest
+
+    data class Text(
+        override val request: QqBotSendRequest,
+    ) : QqBotSendPlanItem
+
+    data class Media(
+        val media: QqBotUrlMedia,
+        override val request: QqBotSendRequest,
+    ) : QqBotSendPlanItem
+}
 
 internal object QqBotMessageMapper {
     fun toTextRequest(
@@ -44,12 +70,99 @@ internal object QqBotMessageMapper {
         )
     }
 
+    fun toSendPlan(
+        batches: List<MessageBatch>,
+        replyToMessageId: String? = null,
+    ): List<QqBotSendPlanItem> {
+        val normalizedReplyTo = replyToMessageId?.trim()?.takeIf { it.isNotBlank() }
+            ?: batches.firstReplyMessageId()
+        val items = mutableListOf<QqBotSendPlanItem>()
+        val pendingText = mutableListOf<String>()
+        var nextMsgSeq = 1
+
+        fun nextRequest(content: String, msgType: Int): QqBotSendRequest {
+            return QqBotSendRequest(
+                content = content,
+                msgType = msgType,
+                replyToMessageId = normalizedReplyTo,
+                msgSeq = nextMsgSeq++,
+            )
+        }
+
+        fun addText(text: String) {
+            text.trim().takeIf { it.isNotBlank() }?.let { pendingText += it }
+        }
+
+        fun flushText() {
+            val content = pendingText.joinToString(separator = "\n").trim()
+            pendingText.clear()
+            if (content.isNotBlank()) {
+                items += QqBotSendPlanItem.Text(nextRequest(content = content, msgType = QQBOT_TEXT_MSG_TYPE))
+            }
+        }
+
+        fun addMedia(fileType: QqBotMediaFileType, uri: String, fallbackText: String) {
+            val url = uri.toHttpUrlOrNull()
+            if (url == null) {
+                addText(fallbackText.ifBlank { "（暂不支持发送${fileType.label}，请使用 HTTP(S) URL）" })
+                return
+            }
+
+            flushText()
+            items += QqBotSendPlanItem.Media(
+                media = QqBotUrlMedia(fileType = fileType, url = url),
+                request = nextRequest(
+                    content = fallbackText.trim().ifBlank { " " },
+                    msgType = QQBOT_MEDIA_MSG_TYPE,
+                ),
+            )
+        }
+
+        batches.asSequence()
+            .flatMap { it.content.asSequence() }
+            .forEach { content ->
+                when (content) {
+                    is MessageContent.Image -> addMedia(
+                        fileType = QqBotMediaFileType.IMAGE,
+                        uri = content.image.uri,
+                        fallbackText = content.fallbackText,
+                    )
+                    is MessageContent.Video -> addMedia(
+                        fileType = QqBotMediaFileType.VIDEO,
+                        uri = content.video.uri,
+                        fallbackText = content.fallbackText,
+                    )
+                    is MessageContent.Audio -> addMedia(
+                        fileType = QqBotMediaFileType.AUDIO,
+                        uri = content.audio.uri,
+                        fallbackText = content.fallbackText,
+                    )
+                    else -> addText(content.fallbackText)
+                }
+            }
+        flushText()
+
+        return items.ifEmpty {
+            listOf(QqBotSendPlanItem.Text(toTextRequest(batches = batches, replyToMessageId = normalizedReplyTo)))
+        }
+    }
+
     private fun List<MessageBatch>.firstReplyMessageId(): String? {
         return asSequence()
             .flatMap { it.content.asSequence() }
             .filterIsInstance<MessageContent.Reply>()
             .mapNotNull { it.messageId.trim().takeIf(String::isNotBlank) }
             .firstOrNull()
+    }
+
+    private fun String.toHttpUrlOrNull(): String? {
+        val value = trim()
+        if (value.isBlank()) return null
+        val uri = runCatching { URI(value) }.getOrNull() ?: return null
+        val scheme = uri.scheme?.lowercase()
+        if (scheme != "http" && scheme != "https") return null
+        if (uri.host.isNullOrBlank()) return null
+        return value
     }
 }
 
@@ -203,4 +316,6 @@ private data class QqBotIncomingAttachment(
 internal const val QQBOT_RAW_FORMAT: String = "qqbot-api-v2-dispatch-json"
 internal const val QQBOT_C2C_MESSAGE_CREATE: String = "C2C_MESSAGE_CREATE"
 internal const val QQBOT_GROUP_AT_MESSAGE_CREATE: String = "GROUP_AT_MESSAGE_CREATE"
+internal const val QQBOT_TEXT_MSG_TYPE: Int = 0
+internal const val QQBOT_MEDIA_MSG_TYPE: Int = 7
 private const val QQBOT_EMPTY_MESSAGE_TEXT: String = "（空消息）"

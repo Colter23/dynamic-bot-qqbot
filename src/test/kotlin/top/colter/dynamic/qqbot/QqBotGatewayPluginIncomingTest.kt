@@ -151,6 +151,40 @@ class QqBotGatewayPluginIncomingTest {
     }
 
     @Test
+    fun `调试回显支持群普通消息的开头 at 文本`() = runBlocking {
+        val plugin = QqBotGatewayPlugin()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val gateway = FakeGateway()
+        plugin.prepareIncomingTest(
+            scope = scope,
+            publishIncoming = {},
+        )
+
+        try {
+            plugin.setPrivate("running", true)
+            plugin.setPrivate(
+                "config",
+                QqBotConfig(
+                    debugEchoText = "测试",
+                    debugEchoReply = "连通性正常",
+                ),
+            )
+            plugin.setPrivate("gateway", gateway)
+
+            plugin.invokeIncoming(groupMessageEvent(content = "<@bot-member-openid> 测试"))
+
+            val call = withTimeout(500) { gateway.groupSend.await() }
+            assertEquals("bot-app-id", call.accountId)
+            assertEquals("group-openid", call.targetId)
+            assertEquals("连通性正常", call.request.content)
+            assertEquals("group-msg-2", call.request.replyToMessageId)
+        } finally {
+            plugin.callPrivate("stopIncomingScope")
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun `入站事件应发布命令请求`() = runBlocking {
         val plugin = QqBotGatewayPlugin()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -349,6 +383,30 @@ class QqBotGatewayPluginIncomingTest {
                     "group_openid":"group-openid",
                     "author":{"member_openid":"member-openid"},
                     "content":"@bot ping"
+                  }
+                }
+            """.trimIndent(),
+        )
+    }
+
+    private fun groupMessageEvent(content: String = "测试"): QqBotIncomingEvent {
+        return QqBotIncomingEvent(
+            type = QQBOT_GROUP_MESSAGE_CREATE,
+            botAccountId = "bot-app-id",
+            rawPayload = """
+                {
+                  "op":0,
+                  "s":3,
+                  "t":"GROUP_MESSAGE_CREATE",
+                  "d":{
+                    "id":"group-msg-2",
+                    "group_openid":"group-openid",
+                    "author":{"member_openid":"member-openid"},
+                    "content":"$content",
+                    "mentions":[
+                      {"bot":true,"id":"bot-member-openid","is_you":true,"member_openid":"bot-member-openid"}
+                    ],
+                    "message_type":0
                   }
                 }
             """.trimIndent(),

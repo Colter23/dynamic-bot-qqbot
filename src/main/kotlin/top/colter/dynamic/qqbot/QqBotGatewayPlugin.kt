@@ -393,7 +393,7 @@ public class QqBotGatewayPlugin :
 
     private fun maybeSendDebugEcho(incoming: IncomingMessage, scope: CoroutineScope) {
         val trigger = config.debugEchoText.trim().takeIf { it.isNotBlank() } ?: return
-        if (incoming.text.trim() != trigger) return
+        if (!incoming.text.matchesDebugEchoTrigger(trigger)) return
         val reply = config.debugEchoReply.trim().ifBlank { "QQ 官方机器人 WebSocket 连通性正常" }
         val accountId = incoming.botAccountId?.trim()?.takeIf { it.isNotBlank() }
             ?: config.appId.trim().takeIf { it.isNotBlank() }
@@ -509,6 +509,11 @@ public class QqBotGatewayPlugin :
         return routeId?.let(::accountIdFromRoute)
             ?: accountId?.trim()?.takeIf { it.isNotBlank() }
     }
+
+    private fun String.matchesDebugEchoTrigger(trigger: String): Boolean {
+        val normalized = trim()
+        return normalized == trigger || normalized.replace(QQBOT_LEADING_MENTION_PATTERN, "").trim() == trigger
+    }
 }
 
 internal fun createQqBotGateway(config: QqBotConfig): QqBotGateway {
@@ -517,3 +522,4 @@ internal fun createQqBotGateway(config: QqBotConfig): QqBotGateway {
 
 private const val MAX_DEBUG_PAYLOAD_CHARS: Int = 2_000
 private const val MAX_DEBUG_TEXT_CHARS: Int = 200
+private val QQBOT_LEADING_MENTION_PATTERN: Regex = Regex("""^(?:\s*<@[^>]+>\s*)+""")

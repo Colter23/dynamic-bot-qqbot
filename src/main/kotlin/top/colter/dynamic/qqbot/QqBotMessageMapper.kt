@@ -5,6 +5,7 @@ import java.time.Instant
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -190,7 +191,8 @@ internal object QqBotIncomingMessageMapper {
         val data = dispatch.data.jsonObject
         return when (event.type) {
             QQBOT_C2C_MESSAGE_CREATE -> data.toC2cIncoming(event)
-            QQBOT_GROUP_AT_MESSAGE_CREATE -> data.toGroupIncoming(event)
+            QQBOT_GROUP_AT_MESSAGE_CREATE -> data.toGroupIncoming(event, mentionedBot = true)
+            QQBOT_GROUP_MESSAGE_CREATE -> data.toGroupIncoming(event, mentionedBot = false)
             else -> null
         }
     }
@@ -220,7 +222,7 @@ internal object QqBotIncomingMessageMapper {
         )
     }
 
-    private fun JsonObject.toGroupIncoming(event: QqBotIncomingEvent): IncomingMessage? {
+    private fun JsonObject.toGroupIncoming(event: QqBotIncomingEvent, mentionedBot: Boolean): IncomingMessage? {
         val groupOpenid = jsonString("group_openid") ?: return null
         val senderId = jsonString("author", "member_openid")
             ?: jsonString("author", "group_member_openid")
@@ -229,6 +231,7 @@ internal object QqBotIncomingMessageMapper {
         val content = jsonString("content").orEmpty()
         val attachments = attachments()
         val segments = buildSegments(content, attachments)
+        val mentions = mentionedAccountIds(event, mentionedBot)
         return IncomingMessage(
             platformId = QQBOT_PLATFORM_ID,
             target = TargetAddress.of(
@@ -245,8 +248,29 @@ internal object QqBotIncomingMessageMapper {
             segments = segments,
             rawFormat = QQBOT_RAW_FORMAT,
             rawPayload = event.rawPayload,
-            mentions = event.botAccountId?.let { setOf(it) }.orEmpty(),
+            mentions = mentions,
         )
+    }
+
+    private fun JsonObject.mentionedAccountIds(event: QqBotIncomingEvent, mentionedBot: Boolean): Set<String> {
+        return buildSet {
+            if (mentionedBot) {
+                event.botAccountId?.trim()?.takeIf { it.isNotBlank() }?.let(::add)
+            }
+            get("mentions")
+                ?.jsonArray
+                ?.forEach { element ->
+                    val item = element.jsonObject
+                    val mentionId = item.jsonString("member_openid") ?: item.jsonString("id")
+                    val isCurrentBot = item["is_you"]?.jsonPrimitive?.booleanOrNull == true
+                    if (isCurrentBot) {
+                        add(event.botAccountId?.trim()?.takeIf { it.isNotBlank() } ?: mentionId.orEmpty())
+                    } else if (!mentionId.isNullOrBlank()) {
+                        add(mentionId)
+                    }
+                }
+            remove("")
+        }
     }
 
     private fun buildSegments(content: String, attachments: List<QqBotIncomingAttachment>): List<IncomingMessageSegment> {
@@ -329,6 +353,7 @@ private data class QqBotIncomingAttachment(
 internal const val QQBOT_RAW_FORMAT: String = "qqbot-api-v2-dispatch-json"
 internal const val QQBOT_C2C_MESSAGE_CREATE: String = "C2C_MESSAGE_CREATE"
 internal const val QQBOT_GROUP_AT_MESSAGE_CREATE: String = "GROUP_AT_MESSAGE_CREATE"
+internal const val QQBOT_GROUP_MESSAGE_CREATE: String = "GROUP_MESSAGE_CREATE"
 internal const val QQBOT_TEXT_MSG_TYPE: Int = 0
 internal const val QQBOT_MEDIA_MSG_TYPE: Int = 7
 private const val QQBOT_EMPTY_MESSAGE_TEXT: String = "（空消息）"

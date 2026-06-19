@@ -213,6 +213,38 @@ class QqBotOpenApiClientTest {
     }
 
     @Test
+    fun `群聊被动回复提交 msg_id 和 msg_seq`() {
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}"""),
+                    QqBotHttpResponse(200, """{"id":"group-reply-1"}"""),
+                ),
+            ),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        val receipt = client.sendGroupMessage(
+            groupOpenid = "group-openid",
+            request = QqBotSendRequest(
+                content = "连通性正常",
+                replyToMessageId = "group-msg-2",
+                msgSeq = 1,
+            ),
+        )
+
+        assertEquals("group-reply-1", receipt.messageId)
+        val body = Json.parseToJsonElement(transport.posts.last().body).jsonObject
+        assertEquals("连通性正常", body.getValue("content").jsonPrimitive.content)
+        assertEquals(0, body.getValue("msg_type").jsonPrimitive.int)
+        assertEquals("group-msg-2", body.getValue("msg_id").jsonPrimitive.content)
+        assertEquals(1, body.getValue("msg_seq").jsonPrimitive.int)
+    }
+
+    @Test
     fun `单聊富媒体资源登记提交官方文件负载`() {
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(

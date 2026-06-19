@@ -24,7 +24,7 @@ QQ 官方机器人插件，用于通过 QQ 官方 API v2 接入 dynamic-bot。
 1. 使用 `AppID` 和 `AppSecret` 获取访问令牌。
 2. 通过 `/gateway` 或 `/gateway/bot` 获取 WebSocket 地址。
 3. 连接 QQ 官方 WebSocket，处理 Hello、Identify、Heartbeat、Dispatch。
-4. 将 `C2C_MESSAGE_CREATE` 和 `GROUP_AT_MESSAGE_CREATE` 映射为 dynamic-bot 入站消息。
+4. 将 `C2C_MESSAGE_CREATE`、`GROUP_MESSAGE_CREATE` 和 `GROUP_AT_MESSAGE_CREATE` 映射为 dynamic-bot 入站消息。
 5. 文本消息直接调用 OpenAPI 回复单聊和群聊。
 6. 图片、视频、语音先调用 `/files` 登记 HTTP(S) URL 或 `base64://` 数据，拿到 `file_info` 后用 `msg_type = 7` 发送。
 7. 官网当前富媒体文档已列出 `file_data` base64 字段，但 `url` 仍标记必填；仅传 `file_data` 的正式环境兼容性仍需实测确认。
@@ -63,6 +63,6 @@ debugEchoText: "ping"
 debugEchoReply: "QQ 官方机器人 WebSocket 连通性正常"
 ```
 
-然后在单聊发送 `ping`，或在群聊中按实际收到的文本配置触发内容。日志中应至少能看到 WebSocket 打开、Hello、Identify、READY、Dispatch、入站消息解析；如果能收到入站消息但回显失败，继续看 OpenAPI 发送失败日志。排查完成后建议关闭 `debugLogPayloads`，避免日志中长期记录原始消息载荷。
+然后在单聊发送 `ping`，或在群聊中按实际收到的文本配置触发内容。群聊消息如果以 `<@机器人> ` 开头，调试回显匹配时会自动忽略这个开头 at。日志中应至少能看到 WebSocket 打开、Hello、Identify、READY、Dispatch、入站消息解析；如果能收到入站消息但回显失败，继续看 OpenAPI 发送失败日志。排查完成后建议关闭 `debugLogPayloads`，避免日志中长期记录原始消息载荷。
 
 频道相关能力暂不作为本插件初始目标。

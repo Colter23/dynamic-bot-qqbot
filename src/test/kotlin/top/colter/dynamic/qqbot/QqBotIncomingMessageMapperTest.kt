@@ -88,6 +88,83 @@ class QqBotIncomingMessageMapperTest {
     }
 
     @Test
+    fun `群普通消息映射为群入站消息且不标记提及`() {
+        val incoming = QqBotIncomingMessageMapper.toIncomingMessage(
+            QqBotIncomingEvent(
+                type = QQBOT_GROUP_MESSAGE_CREATE,
+                botAccountId = "bot-app-id",
+                rawPayload = """
+                    {
+                      "op":0,
+                      "s":2,
+                      "t":"GROUP_MESSAGE_CREATE",
+                      "id":"GROUP_MESSAGE_CREATE:event-id",
+                      "d":{
+                        "id":"group-msg-2",
+                        "group_id":"2200000000000000F189092",
+                        "group_openid":"2200000000000000F189092",
+                        "author":{
+                          "member_openid":"member-openid",
+                          "union_openid":"member-openid",
+                          "username":"Colter"
+                        },
+                        "content":"测试",
+                        "message_type":0,
+                        "timestamp":"2026-06-19T17:35:57+08:00"
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+
+        requireNotNull(incoming)
+        assertEquals(TargetKind.GROUP, incoming.target.kind)
+        assertEquals("2200000000000000F189092", incoming.target.externalId)
+        assertEquals("member-openid", incoming.senderId)
+        assertEquals("group-msg-2", incoming.messageId)
+        assertEquals("测试", incoming.text)
+        assertEquals(emptySet(), incoming.mentions)
+    }
+
+    @Test
+    fun `群普通消息包含 at 时解析提及账号`() {
+        val incoming = QqBotIncomingMessageMapper.toIncomingMessage(
+            QqBotIncomingEvent(
+                type = QQBOT_GROUP_MESSAGE_CREATE,
+                botAccountId = "bot-app-id",
+                rawPayload = """
+                    {
+                      "op":0,
+                      "s":3,
+                      "t":"GROUP_MESSAGE_CREATE",
+                      "id":"GROUP_MESSAGE_CREATE:event-id",
+                      "d":{
+                        "id":"group-msg-3",
+                        "group_openid":"group-openid",
+                        "author":{"member_openid":"member-openid"},
+                        "content":"<@bot-member-openid> 测试",
+                        "mentions":[
+                          {
+                            "bot":true,
+                            "id":"bot-member-openid",
+                            "is_you":true,
+                            "member_openid":"bot-member-openid",
+                            "username":"PuniBot-测试中"
+                          }
+                        ],
+                        "message_type":0
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+
+        requireNotNull(incoming)
+        assertEquals("<@bot-member-openid> 测试", incoming.text)
+        assertEquals(setOf("bot-app-id"), incoming.mentions)
+    }
+
+    @Test
     fun `不支持的事件返回 null`() {
         val incoming = QqBotIncomingMessageMapper.toIncomingMessage(
             QqBotIncomingEvent(

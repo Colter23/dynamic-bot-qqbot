@@ -11,6 +11,7 @@ import top.colter.dynamic.core.config.ConfigApplyResult
 import top.colter.dynamic.core.config.ConfigurablePlugin
 import top.colter.dynamic.core.config.loadOrCreate
 import top.colter.dynamic.core.data.IncomingMessage
+import top.colter.dynamic.core.data.IncomingMessageSegment
 import top.colter.dynamic.core.data.MessageBatch
 import top.colter.dynamic.core.data.MessageContent
 import top.colter.dynamic.core.data.PlatformId
@@ -355,11 +356,11 @@ public class QqBotGatewayPlugin :
             return
         }
         logger.info {
-            "QQ 官方机器人入站消息已解析：messageId=${incoming.messageId.ifBlank { "-" }} target=${incoming.target.kind}:${incoming.target.externalId} sender=${incoming.senderId} text=${incoming.text.take(MAX_DEBUG_TEXT_CHARS)}"
+            "QQ 官方机器人入站消息已解析：messageId=${incoming.messageId.ifBlank { "-" }} target=${incoming.target.kind}:${incoming.target.externalId} sender=${incoming.senderId} ${incoming.mediaDebugSummary()} text=${incoming.text.take(MAX_DEBUG_TEXT_CHARS)}"
         }
 
         val scope = incomingScope ?: return
-        maybeSendDebugEcho(incoming, scope)
+        maybeSendDebugResponses(incoming, scope)
         if (!config.autoPublishIncoming) return
 
         val commandRequest = QqBotCommandMapper.toCommandRequest(
@@ -391,21 +392,39 @@ public class QqBotGatewayPlugin :
         }
     }
 
-    private fun maybeSendDebugEcho(incoming: IncomingMessage, scope: CoroutineScope) {
-        val trigger = config.debugEchoText.trim().takeIf { it.isNotBlank() } ?: return
-        if (!incoming.text.matchesDebugEchoTrigger(trigger)) return
+    private fun maybeSendDebugResponses(incoming: IncomingMessage, scope: CoroutineScope) {
+        var nextMsgSeq = 1
+        if (matchesDebugTextEcho(incoming)) {
+            sendDebugTextEcho(incoming, scope, msgSeq = nextMsgSeq++)
+        }
+        if (matchesDebugImageEcho(incoming)) {
+            sendDebugImageEcho(incoming, scope, msgSeq = nextMsgSeq)
+        }
+    }
+
+    private fun matchesDebugTextEcho(incoming: IncomingMessage): Boolean {
+        val trigger = config.debugEchoText.trim().takeIf { it.isNotBlank() } ?: return false
+        return incoming.text.matchesDebugEchoTrigger(trigger)
+    }
+
+    private fun matchesDebugImageEcho(incoming: IncomingMessage): Boolean {
+        val trigger = config.debugImageEchoText.trim().takeIf { it.isNotBlank() } ?: return false
+        return incoming.text.matchesDebugEchoTrigger(trigger)
+    }
+
+    private fun sendDebugTextEcho(incoming: IncomingMessage, scope: CoroutineScope, msgSeq: Int) {
         val reply = config.debugEchoReply.trim().ifBlank { "QQ 官方机器人 WebSocket 连通性正常" }
         val accountId = incoming.botAccountId?.trim()?.takeIf { it.isNotBlank() }
             ?: config.appId.trim().takeIf { it.isNotBlank() }
             ?: return
-        logger.info { "QQ 官方机器人调试回显已触发：messageId=${incoming.messageId.ifBlank { "-" }}" }
+        logger.info { "QQ 官方机器人调试文本回显已触发：messageId=${incoming.messageId.ifBlank { "-" }} msgSeq=$msgSeq" }
         scope.launch {
             if (!running) return@launch
             runCatching {
                 val request = QqBotMessageMapper.toTextRequest(
                     batches = listOf(MessageBatch(listOf(MessageContent.Text(reply)))),
                     replyToMessageId = incoming.messageId,
-                )
+                ).copy(msgSeq = msgSeq)
                 when (val target = QqBotTarget.fromAddress(incoming.target)) {
                     is QqBotTarget.User -> gateway.sendUserMessage(accountId, target.openid, request)
                     is QqBotTarget.Group -> gateway.sendGroupMessage(accountId, target.groupOpenid, request)
@@ -416,6 +435,44 @@ public class QqBotGatewayPlugin :
             }.onFailure { error ->
                 if (error is CancellationException) throw error
                 logger.warn(error) { "QQ 官方机器人调试回显发送失败" }
+            }
+        }
+    }
+
+    private fun sendDebugImageEcho(incoming: IncomingMessage, scope: CoroutineScope, msgSeq: Int) {
+        val media = QqBotMessageMapper.toMediaResourceSource(
+            fileType = QqBotMediaFileType.IMAGE,
+            uri = config.debugImageEchoSource,
+        ) ?: run {
+            logger.warn { "QQ 官方机器人调试图片资源无效，无法发送图片回显" }
+            return
+        }
+        val accountId = incoming.botAccountId?.trim()?.takeIf { it.isNotBlank() }
+            ?: config.appId.trim().takeIf { it.isNotBlank() }
+            ?: return
+        val caption = config.debugImageEchoCaption.trim().ifBlank { " " }
+        logger.info {
+            "QQ 官方机器人调试图片回显已触发：messageId=${incoming.messageId.ifBlank { "-" }} msgSeq=$msgSeq source=${media.debugSourceLabel()}"
+        }
+        scope.launch {
+            if (!running) return@launch
+            runCatching {
+                val request = QqBotSendRequest(
+                    content = caption,
+                    msgType = QQBOT_MEDIA_MSG_TYPE,
+                    replyToMessageId = incoming.messageId,
+                    msgSeq = msgSeq,
+                )
+                when (val target = QqBotTarget.fromAddress(incoming.target)) {
+                    is QqBotTarget.User -> gateway.sendUserMediaMessage(accountId, target.openid, media, request)
+                    is QqBotTarget.Group -> gateway.sendGroupMediaMessage(accountId, target.groupOpenid, media, request)
+                    is QqBotTarget.Unsupported -> error(target.reason)
+                }
+            }.onSuccess { receipt ->
+                logger.info { "QQ 官方机器人调试图片发送成功：messageId=${receipt.messageId}" }
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                logger.warn(error) { "QQ 官方机器人调试图片发送失败" }
             }
         }
     }
@@ -513,6 +570,32 @@ public class QqBotGatewayPlugin :
     private fun String.matchesDebugEchoTrigger(trigger: String): Boolean {
         val normalized = trim()
         return normalized == trigger || normalized.replace(QQBOT_LEADING_MENTION_PATTERN, "").trim() == trigger
+    }
+
+    private fun IncomingMessage.mediaDebugSummary(): String {
+        val images = segments.count { it is IncomingMessageSegment.Image }
+        val videos = segments.count { it is IncomingMessageSegment.Video }
+        val audios = segments.count { it is IncomingMessageSegment.Audio }
+        val unknown = segments.count { it is IncomingMessageSegment.Unknown }
+        val parts = listOfNotNull(
+            images.takeIf { it > 0 }?.let { "图片=$it" },
+            videos.takeIf { it > 0 }?.let { "视频=$it" },
+            audios.takeIf { it > 0 }?.let { "语音=$it" },
+            unknown.takeIf { it > 0 }?.let { "未知附件=$it" },
+        )
+        return if (parts.isEmpty()) {
+            "媒体=-"
+        } else {
+            "媒体=${parts.joinToString(",")}"
+        }
+    }
+
+    private fun QqBotMediaResourceSource.debugSourceLabel(): String {
+        return when {
+            url != null -> "url"
+            fileDataBase64 != null -> "base64"
+            else -> "unknown"
+        }
     }
 }
 

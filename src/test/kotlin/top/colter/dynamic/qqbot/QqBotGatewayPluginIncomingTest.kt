@@ -185,6 +185,86 @@ class QqBotGatewayPluginIncomingTest {
     }
 
     @Test
+    fun `调试图片回显命中文本时发送群聊富媒体回复`() = runBlocking {
+        val plugin = QqBotGatewayPlugin()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val gateway = FakeGateway()
+        plugin.prepareIncomingTest(
+            scope = scope,
+            publishIncoming = {},
+        )
+
+        try {
+            plugin.setPrivate("running", true)
+            plugin.setPrivate(
+                "config",
+                QqBotConfig(
+                    autoPublishIncoming = false,
+                    debugImageEchoText = "发图",
+                    debugImageEchoSource = "base64://aW1hZ2UtYnl0ZXM=",
+                    debugImageEchoCaption = "图片发送测试",
+                ),
+            )
+            plugin.setPrivate("gateway", gateway)
+
+            plugin.invokeIncoming(groupMessageEvent(content = "<@bot-member-openid> 发图"))
+
+            val call = withTimeout(500) { gateway.groupMediaSend.await() }
+            assertEquals("bot-app-id", call.accountId)
+            assertEquals("group-openid", call.targetId)
+            assertEquals(QqBotMediaFileType.IMAGE, call.media.fileType)
+            assertEquals("aW1hZ2UtYnl0ZXM=", call.media.fileDataBase64)
+            assertEquals("图片发送测试", call.request.content)
+            assertEquals(QQBOT_MEDIA_MSG_TYPE, call.request.msgType)
+            assertEquals("group-msg-2", call.request.replyToMessageId)
+            assertEquals(1, call.request.msgSeq)
+            assertNull(withTimeoutOrNull(200) { gateway.groupSend.await() })
+        } finally {
+            plugin.callPrivate("stopIncomingScope")
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `文字和图片调试回显共用触发词时使用不同回复序号`() = runBlocking {
+        val plugin = QqBotGatewayPlugin()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val gateway = FakeGateway()
+        plugin.prepareIncomingTest(
+            scope = scope,
+            publishIncoming = {},
+        )
+
+        try {
+            plugin.setPrivate("running", true)
+            plugin.setPrivate(
+                "config",
+                QqBotConfig(
+                    autoPublishIncoming = false,
+                    debugEchoText = "测试",
+                    debugEchoReply = "文字正常",
+                    debugImageEchoText = "测试",
+                    debugImageEchoSource = "https://example.com/a.jpg",
+                    debugImageEchoCaption = "图片正常",
+                ),
+            )
+            plugin.setPrivate("gateway", gateway)
+
+            plugin.invokeIncoming(c2cEvent(content = "测试"))
+
+            val textCall = withTimeout(500) { gateway.userSend.await() }
+            val imageCall = withTimeout(500) { gateway.userMediaSend.await() }
+            assertEquals(1, textCall.request.msgSeq)
+            assertEquals(2, imageCall.request.msgSeq)
+            assertEquals("msg-1", imageCall.request.replyToMessageId)
+            assertEquals("https://example.com/a.jpg", imageCall.media.url)
+        } finally {
+            plugin.callPrivate("stopIncomingScope")
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun `入站事件应发布命令请求`() = runBlocking {
         val plugin = QqBotGatewayPlugin()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -291,9 +371,18 @@ class QqBotGatewayPluginIncomingTest {
         val request: QqBotSendRequest,
     )
 
+    private data class MediaSendCall(
+        val accountId: String,
+        val targetId: String,
+        val media: QqBotMediaResourceSource,
+        val request: QqBotSendRequest,
+    )
+
     private class FakeGateway : QqBotGateway {
         val userSend: CompletableDeferred<SendCall> = CompletableDeferred()
         val groupSend: CompletableDeferred<SendCall> = CompletableDeferred()
+        val userMediaSend: CompletableDeferred<MediaSendCall> = CompletableDeferred()
+        val groupMediaSend: CompletableDeferred<MediaSendCall> = CompletableDeferred()
 
         override suspend fun connect(onIncomingEvent: (QqBotIncomingEvent) -> Unit) {
         }
@@ -325,14 +414,20 @@ class QqBotGatewayPluginIncomingTest {
             openid: String,
             media: QqBotMediaResourceSource,
             request: QqBotSendRequest,
-        ): QqBotSendReceipt = unsupported()
+        ): QqBotSendReceipt {
+            userMediaSend.complete(MediaSendCall(accountId, openid, media, request))
+            return QqBotSendReceipt("user-media-send-1")
+        }
 
         override suspend fun sendGroupMediaMessage(
             accountId: String,
             groupOpenid: String,
             media: QqBotMediaResourceSource,
             request: QqBotSendRequest,
-        ): QqBotSendReceipt = unsupported()
+        ): QqBotSendReceipt {
+            groupMediaSend.complete(MediaSendCall(accountId, groupOpenid, media, request))
+            return QqBotSendReceipt("group-media-send-1")
+        }
 
         override suspend fun recallUserMessage(accountId: String, openid: String, messageId: String) {
             unsupported<Unit>()

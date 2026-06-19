@@ -61,8 +61,13 @@ autoPublishIncoming: true
 debugLogPayloads: true
 debugEchoText: "ping"
 debugEchoReply: "QQ 官方机器人 WebSocket 连通性正常"
+debugImageEchoText: "发图"
+debugImageEchoSource: "base64://这里填写图片二进制的base64"
+debugImageEchoCaption: "QQ 官方机器人图片发送测试"
 ```
 
 然后在单聊发送 `ping`，或在群聊中按实际收到的文本配置触发内容。群聊消息如果以 `<@机器人> ` 开头，调试回显匹配时会自动忽略这个开头 at。日志中应至少能看到 WebSocket 打开、Hello、Identify、READY、Dispatch、入站消息解析；如果能收到入站消息但回显失败，继续看 OpenAPI 发送失败日志。排查完成后建议关闭 `debugLogPayloads`，避免日志中长期记录原始消息载荷。
+
+图片发送可以临时配置 `debugImageEchoText` 和 `debugImageEchoSource`。`debugImageEchoSource` 支持 HTTP(S) URL 或 `base64://` 数据；部署机器没有公网 IP 时，优先用 `base64://` 验证官方 `file_data` 路径。触发后日志中应看到“调试图片回显已触发”和“调试图片发送成功”；如果失败，错误日志会包含 `/files` 登记或消息发送接口返回的业务错误。
 
 频道相关能力暂不作为本插件初始目标。

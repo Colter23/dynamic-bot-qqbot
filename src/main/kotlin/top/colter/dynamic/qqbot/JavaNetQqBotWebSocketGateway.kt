@@ -114,11 +114,15 @@ internal class JavaNetQqBotWebSocketGateway(
         request: QqBotSendRequest,
     ): QqBotSendReceipt = withContext(Dispatchers.IO) {
         requireAccount(accountId)
+        logger.info { "QQ 官方机器人正在登记单聊富媒体资源：account=$accountId type=${media.fileType.label} source=${media.sourceLabel()}" }
         val resource = openApiClient.prepareUserMedia(
             openid = openid,
             request = media.toPrepareRequest(),
         )
-        openApiClient.sendUserMessage(openid, request.copy(mediaFileInfo = resource.fileInfo))
+        logger.info { "QQ 官方机器人单聊富媒体资源已登记：account=$accountId type=${media.fileType.label} ttl=${resource.ttlSeconds ?: "-"}" }
+        openApiClient.sendUserMessage(openid, request.copy(mediaFileInfo = resource.fileInfo)).also { receipt ->
+            logger.info { "QQ 官方机器人单聊富媒体消息已发送：account=$accountId messageId=${receipt.messageId}" }
+        }
     }
 
     override suspend fun sendGroupMediaMessage(
@@ -128,11 +132,15 @@ internal class JavaNetQqBotWebSocketGateway(
         request: QqBotSendRequest,
     ): QqBotSendReceipt = withContext(Dispatchers.IO) {
         requireAccount(accountId)
+        logger.info { "QQ 官方机器人正在登记群聊富媒体资源：account=$accountId type=${media.fileType.label} source=${media.sourceLabel()}" }
         val resource = openApiClient.prepareGroupMedia(
             groupOpenid = groupOpenid,
             request = media.toPrepareRequest(),
         )
-        openApiClient.sendGroupMessage(groupOpenid, request.copy(mediaFileInfo = resource.fileInfo))
+        logger.info { "QQ 官方机器人群聊富媒体资源已登记：account=$accountId type=${media.fileType.label} ttl=${resource.ttlSeconds ?: "-"}" }
+        openApiClient.sendGroupMessage(groupOpenid, request.copy(mediaFileInfo = resource.fileInfo)).also { receipt ->
+            logger.info { "QQ 官方机器人群聊富媒体消息已发送：account=$accountId messageId=${receipt.messageId}" }
+        }
     }
 
     override suspend fun recallUserMessage(accountId: String, openid: String, messageId: String) {
@@ -447,6 +455,14 @@ internal class JavaNetQqBotWebSocketGateway(
             url = url,
             fileDataBase64 = fileDataBase64,
         )
+    }
+
+    private fun QqBotMediaResourceSource.sourceLabel(): String {
+        return when {
+            url != null -> "url"
+            fileDataBase64 != null -> "base64"
+            else -> "unknown"
+        }
     }
 
     private fun logFrame(frame: QqBotWebSocketFrame, payload: String) {

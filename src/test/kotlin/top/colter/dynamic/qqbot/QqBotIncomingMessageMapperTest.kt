@@ -165,6 +165,53 @@ class QqBotIncomingMessageMapperTest {
     }
 
     @Test
+    fun `群普通消息带图片附件时映射为图片消息段`() {
+        val incoming = QqBotIncomingMessageMapper.toIncomingMessage(
+            QqBotIncomingEvent(
+                type = QQBOT_GROUP_MESSAGE_CREATE,
+                botAccountId = "bot-app-id",
+                rawPayload = """
+                    {
+                      "op":0,
+                      "s":5,
+                      "t":"GROUP_MESSAGE_CREATE",
+                      "id":"GROUP_MESSAGE_CREATE:event-id",
+                      "d":{
+                        "id":"group-msg-with-image",
+                        "group_openid":"group-openid",
+                        "author":{"member_openid":"member-openid","username":"Colter"},
+                        "content":"测试",
+                        "attachments":[
+                          {
+                            "content":"",
+                            "content_type":"image/jpeg",
+                            "filename":"EBA1A8BA5ACE6A73B5406D86A04E85FF.jpg",
+                            "height":1000,
+                            "size":47836,
+                            "url":"https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=image-file-id&rkey=image-rkey&spec=0",
+                            "width":1000
+                          }
+                        ],
+                        "message_type":0,
+                        "timestamp":"2026-06-19T18:27:07+08:00"
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+
+        requireNotNull(incoming)
+        assertEquals(TargetKind.GROUP, incoming.target.kind)
+        assertEquals("group-openid", incoming.target.externalId)
+        assertEquals("测试", incoming.text)
+        assertEquals(2, incoming.segments.size)
+        assertEquals("测试", assertIs<IncomingMessageSegment.Text>(incoming.segments[0]).text)
+        val image = assertIs<IncomingMessageSegment.Image>(incoming.segments[1])
+        assertEquals("EBA1A8BA5ACE6A73B5406D86A04E85FF.jpg", image.file)
+        assertEquals("https://multimedia.nt.qq.com.cn/download?appid=1407&fileid=image-file-id&rkey=image-rkey&spec=0", image.url)
+    }
+
+    @Test
     fun `不支持的事件返回 null`() {
         val incoming = QqBotIncomingMessageMapper.toIncomingMessage(
             QqBotIncomingEvent(

@@ -56,6 +56,10 @@ internal sealed interface QqBotSendPlanItem {
 }
 
 internal object QqBotMessageMapper {
+    fun toMediaResourceSource(fileType: QqBotMediaFileType, uri: String): QqBotMediaResourceSource? {
+        return uri.toMediaResourceSourceOrNull(fileType)
+    }
+
     fun toTextRequest(
         batches: List<MessageBatch>,
         replyToMessageId: String? = null,
@@ -104,7 +108,7 @@ internal object QqBotMessageMapper {
         }
 
         fun addMedia(fileType: QqBotMediaFileType, uri: String, fallbackText: String) {
-            val source = uri.toMediaResourceSourceOrNull(fileType)
+            val source = toMediaResourceSource(fileType, uri)
             if (source == null) {
                 addText(fallbackText.ifBlank { "（暂不支持发送${fileType.label}，请使用 HTTP(S) URL 或 base64 数据）" })
                 return

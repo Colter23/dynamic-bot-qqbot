@@ -16,6 +16,9 @@ public data class QqBotConfig(
     val debugLogPayloads: Boolean = false,
     val debugEchoText: String = "",
     val debugEchoReply: String = "QQ 官方机器人 WebSocket 连通性正常",
+    val debugImageEchoText: String = "",
+    val debugImageEchoSource: String = "",
+    val debugImageEchoCaption: String = "QQ 官方机器人图片发送测试",
 )
 
 public enum class QqBotIntent(public val bit: Int) {
@@ -144,6 +147,30 @@ public object QqBotConfigForm {
                 description = "触发调试回显时发送的文本。",
                 restartRequired = false,
             ),
+            ConfigFieldSpec(
+                path = "debugImageEchoText",
+                label = "调试图片触发文本",
+                type = ConfigFieldType.TEXT,
+                section = "调试",
+                description = "填写后，当单聊或群聊收到完全相同的文本时，会直接发送调试图片；留空表示关闭。",
+                restartRequired = false,
+            ),
+            ConfigFieldSpec(
+                path = "debugImageEchoSource",
+                label = "调试图片资源",
+                type = ConfigFieldType.TEXT,
+                section = "调试",
+                description = "调试图片使用的 HTTP(S) URL 或 base64:// 数据。无公网 IP 时建议优先测试 base64://。",
+                restartRequired = false,
+            ),
+            ConfigFieldSpec(
+                path = "debugImageEchoCaption",
+                label = "调试图片说明",
+                type = ConfigFieldType.TEXT,
+                section = "调试",
+                description = "触发调试图片回显时附带的文本说明；留空时只发送图片占位文本。",
+                restartRequired = false,
+            ),
         ),
     )
 
@@ -157,6 +184,12 @@ public object QqBotConfigForm {
             require(intent.isNotBlank()) { "QQ 官方机器人事件订阅不能为空" }
         }
         require(config.debugEchoReply.isNotBlank()) { "QQ 官方机器人调试回显回复内容不能为空" }
+        if (config.debugImageEchoText.isNotBlank()) {
+            require(config.debugImageEchoSource.isNotBlank()) { "QQ 官方机器人调试图片资源不能为空" }
+            require(QqBotMessageMapper.toMediaResourceSource(QqBotMediaFileType.IMAGE, config.debugImageEchoSource) != null) {
+                "QQ 官方机器人调试图片资源必须是 HTTP(S) URL 或 base64:// 数据"
+            }
+        }
         config.normalizedIntents()
     }
 }

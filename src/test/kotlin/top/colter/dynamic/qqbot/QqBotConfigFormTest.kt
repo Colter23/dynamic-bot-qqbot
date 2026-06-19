@@ -33,4 +33,21 @@ class QqBotConfigFormTest {
             QqBotConfigForm.validate(QqBotConfig(debugEchoReply = "   "))
         }
     }
+
+    @Test
+    fun `调试图片回显需要图片资源`() {
+        assertFailsWith<IllegalArgumentException> {
+            QqBotConfigForm.validate(QqBotConfig(debugImageEchoText = "发图"))
+        }
+    }
+
+    @Test
+    fun `调试图片回显接受 base64 图片资源`() {
+        QqBotConfigForm.validate(
+            QqBotConfig(
+                debugImageEchoText = "发图",
+                debugImageEchoSource = "base64://aW1hZ2UtYnl0ZXM=",
+            ),
+        )
+    }
 }

@@ -1,8 +1,8 @@
 # dynamic-bot-qqbot
 
-QQ 官方机器人插件骨架，用于后续通过 QQ 官方 API v2 接入 dynamic-bot。
+QQ 官方机器人插件，用于通过 QQ 官方 API v2 接入 dynamic-bot。
 
-当前已接入 WebSocket 网关骨架：可获取访问令牌与网关地址、连接官方 WebSocket、处理 Hello 后 Identify、发送心跳并分发 Dispatch 事件；已支持将单聊/群聊消息事件映射为 dynamic-bot 入站消息，并可通过 OpenAPI 发送、撤回单聊/群聊文本消息。WebSocket 断开后支持基础自动重连，并会在 READY 后记录 `session_id`，重连时优先尝试 Resume；富媒体仍在后续补齐。
+当前已接入 WebSocket 网关能力：可获取访问令牌与网关地址、连接官方 WebSocket、处理 Hello 后 Identify、发送心跳并分发 Dispatch 事件；已支持将单聊/群聊消息事件映射为 dynamic-bot 入站消息，并可通过 OpenAPI 发送、撤回单聊/群聊文本消息。WebSocket 断开后支持基础自动重连，并会在 READY 后记录 `session_id`，重连时优先尝试 Resume；富媒体仍在后续补齐。
 
 ## 当前包含
 
@@ -13,12 +13,12 @@ QQ 官方机器人插件骨架，用于后续通过 QQ 官方 API v2 接入 dyna
 - WebSocket opcode、Identify、Heartbeat、Hello、Dispatch 协议模型。
 - WebSocket READY 会话记录与基础 Resume 恢复。
 - 访问令牌获取、缓存刷新、`/gateway/bot` 接入点获取组件。
-- 基于 Java 标准库 `java.net.http.WebSocket` 的正向 WebSocket 网关骨架。
+- 基于 Java 标准库 `java.net.http.WebSocket` 的正向 WebSocket 网关实现。
 - 单聊/群聊文本消息发送、命令结果发送与消息撤回。
 - 目标列表的接口骨架。
 - 插件边界测试，避免直接依赖主程序运行时实现。
 
-## 预计接入方向
+## 当前接入流程
 
 1. 使用 `AppID` 和 `AppSecret` 获取访问令牌。
 2. 通过 `/gateway` 或 `/gateway/bot` 获取 WebSocket 地址。
@@ -38,7 +38,7 @@ QQ 官方机器人插件骨架，用于后续通过 QQ 官方 API v2 接入 dyna
 
 ## 配置项
 
-插件默认未启用。后续实现接入后，至少需要：
+插件默认未启用。启用前至少需要：
 
 ```yaml
 enabled: true

@@ -22,7 +22,7 @@ import top.colter.dynamic.core.plugin.MessageSinkRouteState
 
 class QqBotGatewayPluginSendTest {
     @Test
-    fun `sendMessage 发送单聊文本并返回回执`() = runBlocking {
+    fun `普通发送单聊文本并返回回执`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway()
         plugin.setPrivate("gateway", gateway)
@@ -42,7 +42,7 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
-    fun `sendCommandResult 发送群聊文本并返回回执`() = runBlocking {
+    fun `发送命令结果到群聊并返回回执`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway()
         plugin.setPrivate("gateway", gateway)
@@ -63,7 +63,7 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
-    fun `sendCommandResult 使用 trace 回复上下文作为官方被动回复 id`() = runBlocking {
+    fun `发送命令结果时使用追踪上下文作为官方被动回复 ID`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway()
         val replyContexts = QqBotReplyContextStore(nowMillis = { 1_000L })
@@ -96,7 +96,7 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
-    fun `sendMessage 拒绝不可用账号且不发送`() = runBlocking {
+    fun `普通发送拒绝不可用账号且不发送`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway(state = MessageSinkRouteState.UNAVAILABLE)
         plugin.setPrivate("gateway", gateway)
@@ -113,7 +113,7 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
-    fun `recallMessage 撤回单聊消息`() = runBlocking {
+    fun `撤回单聊消息`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway()
         plugin.setPrivate("gateway", gateway)
@@ -132,7 +132,7 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
-    fun `recallMessage 撤回群聊消息`() = runBlocking {
+    fun `撤回群聊消息`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway()
         plugin.setPrivate("gateway", gateway)
@@ -151,7 +151,7 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
-    fun `recallMessage 拒绝空消息 id`() = runBlocking {
+    fun `撤回消息时拒绝空消息 ID`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway()
         plugin.setPrivate("gateway", gateway)
@@ -171,7 +171,7 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
-    fun `recallMessage 拒绝不可用账号`() = runBlocking {
+    fun `撤回消息时拒绝不可用账号`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway(state = MessageSinkRouteState.UNAVAILABLE)
         plugin.setPrivate("gateway", gateway)

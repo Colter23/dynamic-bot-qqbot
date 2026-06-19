@@ -39,7 +39,7 @@ class QqBotWebSocketProtocolTest {
     }
 
     @Test
-    fun `identify 负载符合官方 websocket 格式`() {
+    fun `Identify 负载符合官方 WebSocket 格式`() {
         val payload = QqBotWebSocketProtocol.identifyPayload(
             accessToken = " access-token ",
             intentMask = (1 shl 25) or (1 shl 26),
@@ -59,7 +59,7 @@ class QqBotWebSocketProtocolTest {
     }
 
     @Test
-    fun `resume 负载携带会话和最新序号`() {
+    fun `Resume 负载携带会话和最新序号`() {
         val payload = QqBotWebSocketProtocol.resumePayload(
             accessToken = " access-token ",
             sessionId = " session-a ",
@@ -87,7 +87,7 @@ class QqBotWebSocketProtocolTest {
     }
 
     @Test
-    fun `hello 负载暴露心跳间隔`() {
+    fun `Hello 负载暴露心跳间隔`() {
         val hello = QqBotWebSocketProtocol.parseHello(
             """{"op":10,"d":{"heartbeat_interval":45000}}""",
         )
@@ -96,7 +96,7 @@ class QqBotWebSocketProtocolTest {
     }
 
     @Test
-    fun `dispatch 负载暴露类型序号和数据`() {
+    fun `Dispatch 负载暴露类型序号和数据`() {
         val dispatch = QqBotWebSocketProtocol.parseDispatch(
             """{"op":0,"s":123,"t":"C2C_MESSAGE_CREATE","d":{"id":"msg-1","content":"hi"}}""",
         )
@@ -107,7 +107,7 @@ class QqBotWebSocketProtocolTest {
     }
 
     @Test
-    fun `ready 事件暴露恢复会话信息`() {
+    fun `READY 事件暴露恢复会话信息`() {
         val dispatch = QqBotWebSocketProtocol.parseDispatch(
             """{"op":0,"s":123,"t":"READY","d":{"session_id":"session-a"}}""",
         )
@@ -119,7 +119,7 @@ class QqBotWebSocketProtocolTest {
     }
 
     @Test
-    fun `dispatch 负载可以转换为网关入站事件`() {
+    fun `Dispatch 负载可以转换为网关入站事件`() {
         val event = QqBotWebSocketProtocol.incomingEventOrNull(
             """{"op":0,"s":123,"t":"GROUP_AT_MESSAGE_CREATE","d":{"id":"msg-1"}}""",
         )
@@ -129,7 +129,7 @@ class QqBotWebSocketProtocolTest {
     }
 
     @Test
-    fun `非 dispatch 负载在入站事件转换时被忽略`() {
+    fun `非 Dispatch 负载在入站事件转换时被忽略`() {
         assertNull(QqBotWebSocketProtocol.incomingEventOrNull("""{"op":11,"d":null}"""))
     }
 

@@ -23,8 +23,8 @@ internal class QqBotReplyContextStore(
     }
 
     init {
-        require(maxSize > 0) { "QQ bot reply context max size must be positive" }
-        require(ttlMillis >= 0) { "QQ bot reply context TTL must not be negative" }
+        require(maxSize > 0) { "QQ 官方机器人回复上下文最大数量必须大于 0" }
+        require(ttlMillis >= 0) { "QQ 官方机器人回复上下文 TTL 不能为负数" }
     }
 
     @Synchronized

@@ -8,7 +8,7 @@ val pluginRuntimeClasspath = configurations.named("runtimeClasspath")
 
 tasks.register<Jar>("fatJar") {
     group = "build"
-    description = "Builds a dynamic-bot plugin fat jar without host-provided dependencies."
+    description = "构建 dynamic-bot 插件胖包，并排除宿主已提供的依赖。"
     archiveClassifier.set("all")
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 

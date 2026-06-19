@@ -172,7 +172,7 @@ internal class QqBotOpenApiClient(
             action = action,
             statusCode = response.statusCode,
             code = errorCode,
-            message = errorMessage ?: "HTTP ${response.statusCode}",
+            message = errorMessage ?: "HTTP 状态码 ${response.statusCode}",
             body = response.body,
         )
     }
@@ -275,13 +275,13 @@ internal class QqBotOpenApiException(
 ) : RuntimeException(
     buildString {
         append(action)
-        append("失败：status=")
+        append("失败：状态码=")
         append(statusCode)
         if (!code.isNullOrBlank()) {
-            append(" code=")
+            append(" 业务码=")
             append(code)
         }
-        append(" message=")
+        append(" 消息=")
         append(message)
     },
 )

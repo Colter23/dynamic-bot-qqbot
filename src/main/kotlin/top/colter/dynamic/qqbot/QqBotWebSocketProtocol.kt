@@ -68,7 +68,7 @@ internal object QqBotWebSocketProtocol {
     ): String {
         val trimmedToken = accessToken.trim()
         require(trimmedToken.isNotBlank()) { "QQ 官方机器人访问令牌不能为空" }
-        require(intentMask > 0) { "QQ 官方机器人 WebSocket intentMask 必须大于 0" }
+        require(intentMask > 0) { "QQ 官方机器人 WebSocket 事件订阅掩码必须大于 0" }
 
         return json.encodeToString(
             buildJsonObject {

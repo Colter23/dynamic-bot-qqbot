@@ -12,7 +12,7 @@ import top.colter.dynamic.core.plugin.MessageSinkRouteState
 
 class JavaNetQqBotWebSocketGatewayTest {
     @Test
-    fun `连接时获取接入点并打开 websocket`() = runTest {
+    fun `连接时获取接入点并打开 WebSocket`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val gateway = testGateway(connector = connector)
 
@@ -30,7 +30,7 @@ class JavaNetQqBotWebSocketGatewayTest {
     }
 
     @Test
-    fun `收到 hello 后发送 identify 并安排心跳`() = runTest {
+    fun `收到 Hello 后发送 Identify 并安排心跳`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
         val gateway = testGateway(connector = connector, heartbeatScheduler = heartbeatScheduler)
@@ -52,7 +52,7 @@ class JavaNetQqBotWebSocketGatewayTest {
     }
 
     @Test
-    fun `ready 事件记录会话并标记账号就绪`() = runTest {
+    fun `READY 事件记录会话并标记账号就绪`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val gateway = testGateway(connector = connector)
 
@@ -64,7 +64,7 @@ class JavaNetQqBotWebSocketGatewayTest {
     }
 
     @Test
-    fun `心跳使用最新的 dispatch 序号`() = runTest {
+    fun `心跳使用最新 Dispatch 序号`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
         val gateway = testGateway(connector = connector, heartbeatScheduler = heartbeatScheduler)
@@ -83,7 +83,7 @@ class JavaNetQqBotWebSocketGatewayTest {
     }
 
     @Test
-    fun `dispatch 负载会转发给入站处理器`() = runTest {
+    fun `Dispatch 负载会转发给入站处理器`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val gateway = testGateway(connector = connector)
         val events = mutableListOf<QqBotIncomingEvent>()
@@ -96,7 +96,7 @@ class JavaNetQqBotWebSocketGatewayTest {
     }
 
     @Test
-    fun `关闭时取消心跳并关闭 websocket`() = runTest {
+    fun `关闭时取消心跳并关闭 WebSocket`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
         val gateway = testGateway(connector = connector, heartbeatScheduler = heartbeatScheduler)
@@ -127,7 +127,7 @@ class JavaNetQqBotWebSocketGatewayTest {
     }
 
     @Test
-    fun `远端关闭后安排重连并打开新 websocket`() = runTest {
+    fun `远端关闭后安排重连并打开新 WebSocket`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
         val reconnectScheduler = FakeQqBotReconnectScheduler()
@@ -167,7 +167,7 @@ class JavaNetQqBotWebSocketGatewayTest {
     }
 
     @Test
-    fun `invalid session 后下一次重连退回 identify`() = runTest {
+    fun `INVALID_SESSION 后下一次重连退回 Identify`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
         val reconnectScheduler = FakeQqBotReconnectScheduler()
@@ -193,7 +193,7 @@ class JavaNetQqBotWebSocketGatewayTest {
     }
 
     @Test
-    fun `网关重连 opcode 会关闭当前 websocket 并安排重连`() = runTest {
+    fun `RECONNECT 操作码会关闭当前 WebSocket 并安排重连`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
         val reconnectScheduler = FakeQqBotReconnectScheduler()
@@ -246,7 +246,7 @@ class JavaNetQqBotWebSocketGatewayTest {
     }
 
     @Test
-    fun `就绪网关通过 openapi 发送单聊和群聊消息`() = runTest {
+    fun `就绪网关通过 OpenAPI 发送单聊和群聊消息`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(
@@ -284,7 +284,7 @@ class JavaNetQqBotWebSocketGatewayTest {
     }
 
     @Test
-    fun `就绪网关通过 openapi 撤回单聊和群聊消息`() = runTest {
+    fun `就绪网关通过 OpenAPI 撤回单聊和群聊消息`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(

@@ -104,7 +104,7 @@ class QqBotOpenApiClientTest {
     }
 
     @Test
-    fun `openapi 错误包含状态码业务码和消息`() {
+    fun `OpenAPI 错误包含状态码业务码和消息`() {
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(
                 listOf(QqBotHttpResponse(401, """{"code":11243,"message":"token invalid"}""")),
@@ -211,7 +211,7 @@ class QqBotOpenApiClientTest {
     }
 
     @Test
-    fun `单聊消息撤回提交官方 delete 请求`() {
+    fun `单聊消息撤回提交官方 DELETE 请求`() {
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(
                 listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
@@ -233,7 +233,7 @@ class QqBotOpenApiClientTest {
     }
 
     @Test
-    fun `群聊消息撤回提交官方 delete 请求`() {
+    fun `群聊消息撤回提交官方 DELETE 请求`() {
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(
                 listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),

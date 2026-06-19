@@ -43,14 +43,14 @@ public object QqBotConfigForm {
 
     public val spec: ConfigFormSpec = ConfigFormSpec(
         title = "QQ 官方机器人",
-        description = "QQ 官方 API v2 接入配置；当前项目先保留配置骨架，真实连接实现后启用。",
+        description = "QQ 官方 API v2 接入配置，用于连接 WebSocket 网关并通过 OpenAPI 发送单聊/群聊消息。",
         fields = listOf(
             ConfigFieldSpec(
                 path = "enabled",
                 label = "启用插件",
                 type = ConfigFieldType.BOOLEAN,
                 section = "连接",
-                description = "开启后插件会尝试连接 QQ 官方 WebSocket；当前版本仅保留框架，不会真正连接。",
+                description = "开启后插件会连接 QQ 官方 WebSocket，并接入单聊/群聊消息收发。",
                 restartRequired = true,
                 restartTarget = "QQ 官方机器人插件",
             ),

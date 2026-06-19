@@ -162,6 +162,10 @@ class QqBotIncomingMessageMapperTest {
         requireNotNull(incoming)
         assertEquals("<@bot-member-openid> 测试", incoming.text)
         assertEquals(setOf("bot-app-id"), incoming.mentions)
+        assertEquals(2, incoming.segments.size)
+        val mention = assertIs<IncomingMessageSegment.Mention>(incoming.segments[0])
+        assertEquals("bot-app-id", mention.targetId)
+        assertEquals(" 测试", assertIs<IncomingMessageSegment.Text>(incoming.segments[1]).text)
     }
 
     @Test

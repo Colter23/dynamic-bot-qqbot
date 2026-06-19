@@ -285,12 +285,68 @@ class QqBotGatewayPluginIncomingTest {
             val command = withTimeout(500) { publishedCommand.await() }
             assertEquals("group-msg-1", incoming.messageId)
             assertEquals(QQBOT_PLUGIN_ID, command.sourcePlugin)
-            assertEquals("@bot ping", command.rawText)
+            assertEquals("ping", command.rawText)
             assertTrue(command.traceId.isNotBlank())
             assertEquals("qq", command.context.platform)
             assertEquals(TargetKind.GROUP, command.context.chatType)
             assertEquals("group-openid", command.context.chatId)
             assertEquals("member-openid", command.context.senderId)
+            assertEquals("bot-app-id", command.context.botAccountId)
+            assertEquals("bot-app-id", command.context.target.accountId)
+            assertEquals(setOf("bot-app-id"), command.context.mentionedAccountIds)
+        } finally {
+            plugin.callPrivate("stopIncomingScope")
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `群普通消息 at 当前机器人时应发布可被主项目解析的命令文本`() = runBlocking {
+        val plugin = QqBotGatewayPlugin()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val publishedCommand = CompletableDeferred<CommandPublishRequest>()
+        plugin.prepareIncomingTest(
+            scope = scope,
+            publishIncoming = {},
+            publishCommand = { request -> publishedCommand.complete(request) },
+        )
+
+        try {
+            plugin.setPrivate("running", true)
+
+            plugin.invokeIncoming(groupMessageEvent(content = "<@bot-member-openid> /db help"))
+
+            val command = withTimeout(500) { publishedCommand.await() }
+            assertEquals("/db help", command.rawText)
+            assertEquals(TargetKind.GROUP, command.context.chatType)
+            assertEquals("bot-app-id", command.context.botAccountId)
+            assertEquals("bot-app-id", command.context.target.accountId)
+            assertEquals(setOf("bot-app-id"), command.context.mentionedAccountIds)
+        } finally {
+            plugin.callPrivate("stopIncomingScope")
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun `私聊命令上下文应视为发给当前机器人`() = runBlocking {
+        val plugin = QqBotGatewayPlugin()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val publishedCommand = CompletableDeferred<CommandPublishRequest>()
+        plugin.prepareIncomingTest(
+            scope = scope,
+            publishIncoming = {},
+            publishCommand = { request -> publishedCommand.complete(request) },
+        )
+
+        try {
+            plugin.setPrivate("running", true)
+
+            plugin.invokeIncoming(c2cEvent(content = "/db help"))
+
+            val command = withTimeout(500) { publishedCommand.await() }
+            assertEquals("/db help", command.rawText)
+            assertEquals(TargetKind.USER, command.context.chatType)
             assertEquals("bot-app-id", command.context.botAccountId)
             assertEquals("bot-app-id", command.context.target.accountId)
             assertEquals(setOf("bot-app-id"), command.context.mentionedAccountIds)

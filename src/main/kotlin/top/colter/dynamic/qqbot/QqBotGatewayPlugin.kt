@@ -374,6 +374,9 @@ public class QqBotGatewayPlugin :
             if (!running) return@launch
             runCatching {
                 incomingMessagePublisher.publish(incoming)
+                logger.info {
+                    "QQ 官方机器人入站消息已提交主项目：messageId=${incoming.messageId.ifBlank { "-" }} target=${incoming.target.stableValue()}"
+                }
             }.onFailure { error ->
                 if (error is CancellationException) throw error
                 logger.warn(error) {
@@ -383,6 +386,9 @@ public class QqBotGatewayPlugin :
             if (commandRequest != null) {
                 try {
                     commandPublisher.publish(commandRequest)
+                    logger.info {
+                        "QQ 官方机器人命令消息已提交主项目：traceId=${commandRequest.traceId} rawText=${commandRequest.rawText.take(MAX_DEBUG_TEXT_CHARS)}"
+                    }
                 } catch (error: CancellationException) {
                     throw error
                 } catch (error: Throwable) {
@@ -569,7 +575,11 @@ public class QqBotGatewayPlugin :
 
     private fun String.matchesDebugEchoTrigger(trigger: String): Boolean {
         val normalized = trim()
-        return normalized == trigger || normalized.replace(QQBOT_LEADING_MENTION_PATTERN, "").trim() == trigger
+        val withoutLeadingMention = normalized
+            .replace(QQBOT_LEADING_OFFICIAL_MENTION_PATTERN, "")
+            .replace(QQBOT_LEADING_PLAIN_MENTION_PATTERN, "")
+            .trim()
+        return normalized == trigger || withoutLeadingMention == trigger
     }
 
     private fun IncomingMessage.mediaDebugSummary(): String {
@@ -605,4 +615,5 @@ internal fun createQqBotGateway(config: QqBotConfig): QqBotGateway {
 
 private const val MAX_DEBUG_PAYLOAD_CHARS: Int = 2_000
 private const val MAX_DEBUG_TEXT_CHARS: Int = 200
-private val QQBOT_LEADING_MENTION_PATTERN: Regex = Regex("""^(?:\s*<@[^>]+>\s*)+""")
+private val QQBOT_LEADING_OFFICIAL_MENTION_PATTERN: Regex = Regex("""^(?:\s*<@[^>]+>\s*)+""")
+private val QQBOT_LEADING_PLAIN_MENTION_PATTERN: Regex = Regex("""^(?:\s*@\S+\s*)+""")

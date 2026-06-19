@@ -234,8 +234,9 @@ internal object QqBotIncomingMessageMapper {
         val messageId = jsonString("id")
         val content = jsonString("content").orEmpty()
         val attachments = attachments()
-        val segments = buildSegments(content, attachments)
-        val mentions = mentionedAccountIds(event, mentionedBot)
+        val mentionItems = mentionItems(event)
+        val segments = buildSegments(content, attachments, mentionItems)
+        val mentions = mentionItems.mentionedAccountIds(event, mentionedBot)
         return IncomingMessage(
             platformId = QQBOT_PLATFORM_ID,
             target = TargetAddress.of(
@@ -256,36 +257,52 @@ internal object QqBotIncomingMessageMapper {
         )
     }
 
-    private fun JsonObject.mentionedAccountIds(event: QqBotIncomingEvent, mentionedBot: Boolean): Set<String> {
+    private fun List<QqBotIncomingMention>.mentionedAccountIds(event: QqBotIncomingEvent, mentionedBot: Boolean): Set<String> {
         return buildSet {
             if (mentionedBot) {
                 event.botAccountId?.trim()?.takeIf { it.isNotBlank() }?.let(::add)
             }
-            get("mentions")
-                ?.jsonArray
-                ?.forEach { element ->
-                    val item = element.jsonObject
-                    val mentionId = item.jsonString("member_openid") ?: item.jsonString("id")
-                    val isCurrentBot = item["is_you"]?.jsonPrimitive?.booleanOrNull == true
-                    if (isCurrentBot) {
-                        add(event.botAccountId?.trim()?.takeIf { it.isNotBlank() } ?: mentionId.orEmpty())
-                    } else if (!mentionId.isNullOrBlank()) {
-                        add(mentionId)
-                    }
-                }
+            this@mentionedAccountIds.forEach { add(it.accountId) }
             remove("")
         }
     }
 
-    private fun buildSegments(content: String, attachments: List<QqBotIncomingAttachment>): List<IncomingMessageSegment> {
+    private fun buildSegments(
+        content: String,
+        attachments: List<QqBotIncomingAttachment>,
+        mentions: List<QqBotIncomingMention> = emptyList(),
+    ): List<IncomingMessageSegment> {
         return buildList {
-            if (content.isNotEmpty()) {
-                add(IncomingMessageSegment.Text(content))
-            }
+            addAll(content.toTextAndMentionSegments(mentions))
             attachments.forEach { attachment ->
                 add(attachment.toSegment())
             }
         }
+    }
+
+    private fun String.toTextAndMentionSegments(mentions: List<QqBotIncomingMention>): List<IncomingMessageSegment> {
+        if (isEmpty()) return emptyList()
+        val byRawId = mentions.associateBy { it.rawId }
+        val segments = mutableListOf<IncomingMessageSegment>()
+        var cursor = 0
+        QQBOT_OFFICIAL_MENTION_PATTERN.findAll(this).forEach { match ->
+            if (match.range.first > cursor) {
+                val text = substring(cursor, match.range.first)
+                if (text.isNotEmpty()) segments += IncomingMessageSegment.Text(text)
+            }
+            val rawId = match.groupValues[1].trim()
+            val mention = byRawId[rawId]
+            segments += IncomingMessageSegment.Mention(
+                targetId = mention?.accountId ?: rawId,
+                rawPayload = mention?.rawPayload ?: match.value,
+            )
+            cursor = match.range.last + 1
+        }
+        if (cursor < length) {
+            val text = substring(cursor)
+            if (text.isNotEmpty()) segments += IncomingMessageSegment.Text(text)
+        }
+        return segments.ifEmpty { listOf(IncomingMessageSegment.Text(this)) }
     }
 
     private fun QqBotIncomingAttachment.toSegment(): IncomingMessageSegment {
@@ -327,6 +344,26 @@ internal object QqBotIncomingMessageMapper {
             .orEmpty()
     }
 
+    private fun JsonObject.mentionItems(event: QqBotIncomingEvent): List<QqBotIncomingMention> {
+        return get("mentions")
+            ?.jsonArray
+            ?.mapNotNull { element ->
+                val item = element.jsonObject
+                val rawId = item.jsonString("member_openid") ?: item.jsonString("id") ?: return@mapNotNull null
+                val isCurrentBot = item["is_you"]?.jsonPrimitive?.booleanOrNull == true
+                QqBotIncomingMention(
+                    rawId = rawId,
+                    accountId = if (isCurrentBot) {
+                        event.botAccountId?.trim()?.takeIf { it.isNotBlank() } ?: rawId
+                    } else {
+                        rawId
+                    },
+                    rawPayload = json.encodeToString(JsonElement.serializer(), element),
+                )
+            }
+            .orEmpty()
+    }
+
     private fun JsonObject.timestampSeconds(): Long {
         val raw = jsonString("timestamp") ?: return 0L
         return runCatching { Instant.parse(raw).epochSecond }.getOrDefault(0L)
@@ -354,6 +391,12 @@ private data class QqBotIncomingAttachment(
     val rawPayload: String,
 )
 
+private data class QqBotIncomingMention(
+    val rawId: String,
+    val accountId: String,
+    val rawPayload: String,
+)
+
 internal const val QQBOT_RAW_FORMAT: String = "qqbot-api-v2-dispatch-json"
 internal const val QQBOT_C2C_MESSAGE_CREATE: String = "C2C_MESSAGE_CREATE"
 internal const val QQBOT_GROUP_AT_MESSAGE_CREATE: String = "GROUP_AT_MESSAGE_CREATE"
@@ -362,3 +405,4 @@ internal const val QQBOT_TEXT_MSG_TYPE: Int = 0
 internal const val QQBOT_MEDIA_MSG_TYPE: Int = 7
 private const val QQBOT_EMPTY_MESSAGE_TEXT: String = "（空消息）"
 private const val BASE64_URI_PREFIX: String = "base64://"
+private val QQBOT_OFFICIAL_MENTION_PATTERN: Regex = Regex("""<@([^>]+)>""")

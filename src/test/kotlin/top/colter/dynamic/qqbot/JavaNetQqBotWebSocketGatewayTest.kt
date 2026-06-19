@@ -48,6 +48,18 @@ class JavaNetQqBotWebSocketGatewayTest {
         assertEquals(listOf(0, 1), identifyData.getValue("shard").jsonArray.map { it.jsonPrimitive.int })
         assertEquals(45_000, heartbeatScheduler.scheduled.single().initialDelayMillis)
         assertEquals(45_000, heartbeatScheduler.scheduled.single().intervalMillis)
+        assertEquals(MessageSinkRouteState.UNAVAILABLE, gateway.availableAccounts().single().state)
+    }
+
+    @Test
+    fun `ready 事件记录会话并标记账号就绪`() = runTest {
+        val connector = FakeQqBotWebSocketConnector()
+        val gateway = testGateway(connector = connector)
+
+        gateway.connect { }
+        connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        connector.listener.onText("""{"op":0,"s":88,"t":"READY","d":{"session_id":"session-a"}}""")
+
         assertEquals(MessageSinkRouteState.READY, gateway.availableAccounts().single().state)
     }
 
@@ -59,6 +71,7 @@ class JavaNetQqBotWebSocketGatewayTest {
 
         gateway.connect { }
         connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        connector.listener.onText("""{"op":0,"s":88,"t":"READY","d":{"session_id":"session-a"}}""")
         connector.listener.onText("""{"op":0,"s":123,"t":"C2C_MESSAGE_CREATE","d":{"id":"msg-1"}}""")
         heartbeatScheduler.scheduled.single().task()
 
@@ -105,6 +118,7 @@ class JavaNetQqBotWebSocketGatewayTest {
 
         gateway.connect { }
         connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        connector.listener.onText("""{"op":0,"s":88,"t":"READY","d":{"session_id":"session-a"}}""")
         assertEquals(MessageSinkRouteState.READY, gateway.availableAccounts().single().state)
 
         connector.listener.onClosed(4009, "expired")
@@ -127,6 +141,7 @@ class JavaNetQqBotWebSocketGatewayTest {
 
         gateway.connect { }
         connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        connector.listener.onText("""{"op":0,"s":88,"t":"READY","d":{"session_id":"session-a"}}""")
         connector.listener.onClosed(4009, "expired")
 
         assertEquals(MessageSinkRouteState.UNAVAILABLE, gateway.availableAccounts().single().state)
@@ -135,6 +150,9 @@ class JavaNetQqBotWebSocketGatewayTest {
 
         reconnectScheduler.scheduled.single().task()
         connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":30000}}""")
+        val resumeRoot = Json.parseToJsonElement(connector.session.sentTexts.single()).jsonObject
+        val resumeData = resumeRoot.getValue("d").jsonObject
+        connector.listener.onText("""{"op":0,"s":124,"t":"RESUMED","d":{}}""")
 
         assertEquals(
             listOf("wss://api.sgroup.qq.com/websocket", "wss://api.sgroup.qq.com/websocket-reconnect"),
@@ -143,7 +161,34 @@ class JavaNetQqBotWebSocketGatewayTest {
         assertEquals(2, connector.sessions.size)
         assertEquals(MessageSinkRouteState.READY, gateway.availableAccounts().single().state)
         assertEquals(30_000, heartbeatScheduler.scheduled.last().intervalMillis)
+        assertEquals(QqBotOpcode.RESUME.code, resumeRoot.getValue("op").jsonPrimitive.int)
+        assertEquals("session-a", resumeData.getValue("session_id").jsonPrimitive.content)
+        assertEquals(88, resumeData.getValue("seq").jsonPrimitive.int)
+    }
+
+    @Test
+    fun `invalid session 后下一次重连退回 identify`() = runTest {
+        val connector = FakeQqBotWebSocketConnector()
+        val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
+        val reconnectScheduler = FakeQqBotReconnectScheduler()
+        val transport = reconnectTransport()
+        val gateway = testGateway(
+            connector = connector,
+            heartbeatScheduler = heartbeatScheduler,
+            reconnectScheduler = reconnectScheduler,
+            transport = transport,
+        )
+
+        gateway.connect { }
+        connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        connector.listener.onText("""{"op":0,"s":88,"t":"READY","d":{"session_id":"session-a"}}""")
+        connector.listener.onText("""{"op":9,"d":false}""")
+
+        reconnectScheduler.scheduled.single().task()
+        connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":30000}}""")
+
         val identifyRoot = Json.parseToJsonElement(connector.session.sentTexts.single()).jsonObject
+
         assertEquals(QqBotOpcode.IDENTIFY.code, identifyRoot.getValue("op").jsonPrimitive.int)
     }
 
@@ -160,6 +205,7 @@ class JavaNetQqBotWebSocketGatewayTest {
 
         gateway.connect { }
         connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        connector.listener.onText("""{"op":0,"s":88,"t":"READY","d":{"session_id":"session-a"}}""")
         connector.listener.onText("""{"op":7,"d":null}""")
 
         assertEquals(MessageSinkRouteState.UNAVAILABLE, gateway.availableAccounts().single().state)
@@ -218,6 +264,7 @@ class JavaNetQqBotWebSocketGatewayTest {
 
         gateway.connect { }
         connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        connector.listener.onText("""{"op":0,"s":88,"t":"READY","d":{"session_id":"session-a"}}""")
 
         val userReceipt = gateway.sendUserMessage(
             accountId = "app-id",

@@ -59,6 +59,23 @@ class QqBotWebSocketProtocolTest {
     }
 
     @Test
+    fun `resume 负载携带会话和最新序号`() {
+        val payload = QqBotWebSocketProtocol.resumePayload(
+            accessToken = " access-token ",
+            sessionId = " session-a ",
+            sequence = 123,
+        )
+
+        val root = Json.parseToJsonElement(payload).jsonObject
+        val data = root.getValue("d").jsonObject
+
+        assertEquals(QqBotOpcode.RESUME.code, root.getValue("op").jsonPrimitive.int)
+        assertEquals("QQBot access-token", data.getValue("token").jsonPrimitive.content)
+        assertEquals("session-a", data.getValue("session_id").jsonPrimitive.content)
+        assertEquals(123, data.getValue("seq").jsonPrimitive.long)
+    }
+
+    @Test
     fun `心跳负载携带最新序号或 null`() {
         val withSequence = Json.parseToJsonElement(QqBotWebSocketProtocol.heartbeatPayload(42)).jsonObject
         val withoutSequence = Json.parseToJsonElement(QqBotWebSocketProtocol.heartbeatPayload(null)).jsonObject
@@ -87,6 +104,18 @@ class QqBotWebSocketProtocolTest {
         assertEquals("C2C_MESSAGE_CREATE", dispatch.type)
         assertEquals(123, dispatch.sequence)
         assertEquals("hi", dispatch.data.jsonObject.getValue("content").jsonPrimitive.content)
+    }
+
+    @Test
+    fun `ready 事件暴露恢复会话信息`() {
+        val dispatch = QqBotWebSocketProtocol.parseDispatch(
+            """{"op":0,"s":123,"t":"READY","d":{"session_id":"session-a"}}""",
+        )
+
+        val ready = QqBotWebSocketProtocol.parseReadySession(dispatch)
+
+        assertEquals("session-a", ready.sessionId)
+        assertEquals(123, ready.sequence)
     }
 
     @Test

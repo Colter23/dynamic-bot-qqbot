@@ -44,6 +44,9 @@ internal class JavaNetQqBotWebSocketGateway(
     private var latestSequence: Long? = null
 
     @Volatile
+    private var sessionId: String? = null
+
+    @Volatile
     private var accessToken: String = ""
 
     @Volatile
@@ -69,6 +72,7 @@ internal class JavaNetQqBotWebSocketGateway(
         reconnecting = false
         reconnectAttempts = 0
         latestSequence = null
+        sessionId = null
         account = initialAccount(MessageSinkRouteState.UNAVAILABLE)
 
         withContext(Dispatchers.IO) {
@@ -240,17 +244,49 @@ internal class JavaNetQqBotWebSocketGateway(
             ?: return
 
         startHeartbeat(hello.heartbeatIntervalMillis)
-        sendIdentify()
-        markReady()
+        sendResumeOrIdentify()
         logger.info { "QQ 官方机器人 WebSocket Hello 包已处理：heartbeat=${hello.heartbeatIntervalMillis}ms" }
     }
 
     private fun handleDispatch(payload: String) {
-        val event = QqBotWebSocketProtocol.incomingEventOrNull(
-            payload = payload,
+        val dispatch = runCatching { QqBotWebSocketProtocol.parseDispatch(payload) }
+            .onFailure { error -> logger.warn(error) { "QQ 官方机器人 Dispatch 包解析失败" } }
+            .getOrNull()
+            ?: return
+        if (handleControlDispatch(dispatch)) return
+
+        val event = QqBotIncomingEvent(
+            type = dispatch.type,
+            rawPayload = dispatch.rawPayload,
             botAccountId = config.appId.trim().takeIf { it.isNotBlank() },
-        ) ?: return
+        )
         incomingEventHandler?.invoke(event)
+    }
+
+    private fun handleControlDispatch(dispatch: QqBotDispatchEvent): Boolean {
+        return when (dispatch.type) {
+            QQBOT_READY_EVENT -> {
+                recordReadySession(dispatch)
+                true
+            }
+            QQBOT_RESUMED_EVENT -> {
+                markReady()
+                logger.info { "QQ 官方机器人 WebSocket 会话已恢复：sessionId=${sessionId.orEmpty()}" }
+                true
+            }
+            else -> false
+        }
+    }
+
+    private fun recordReadySession(dispatch: QqBotDispatchEvent) {
+        val ready = runCatching { QqBotWebSocketProtocol.parseReadySession(dispatch) }
+            .onFailure { error -> logger.warn(error) { "QQ 官方机器人 READY 事件解析失败" } }
+            .getOrNull()
+            ?: return
+        sessionId = ready.sessionId
+        ready.sequence?.let { latestSequence = it }
+        markReady()
+        logger.info { "QQ 官方机器人 WebSocket 会话已就绪：sessionId=${ready.sessionId}" }
     }
 
     private fun handleReconnectRequest() {
@@ -259,6 +295,8 @@ internal class JavaNetQqBotWebSocketGateway(
     }
 
     private fun handleInvalidSession() {
+        sessionId = null
+        latestSequence = null
         markUnavailable("QQ 官方机器人会话无效")
         scheduleReconnect("QQ 官方机器人会话无效", closeCurrentSession = true)
     }
@@ -280,6 +318,23 @@ internal class JavaNetQqBotWebSocketGateway(
             intentMask = config.enabledIntentMask(),
         )
         webSocket?.sendText(payload)
+    }
+
+    private fun sendResumeOrIdentify() {
+        val currentSessionId = sessionId
+        val sequence = latestSequence
+        if (!currentSessionId.isNullOrBlank() && sequence != null) {
+            val payload = QqBotWebSocketProtocol.resumePayload(
+                accessToken = accessToken,
+                sessionId = currentSessionId,
+                sequence = sequence,
+            )
+            webSocket?.sendText(payload)
+            logger.info { "QQ 官方机器人正在恢复 WebSocket 会话：sessionId=$currentSessionId seq=$sequence" }
+            return
+        }
+
+        sendIdentify()
     }
 
     private fun markReady() {

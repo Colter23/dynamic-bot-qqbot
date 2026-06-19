@@ -50,6 +50,11 @@ internal data class QqBotDispatchEvent(
     val rawPayload: String,
 )
 
+internal data class QqBotReadySession(
+    val sessionId: String,
+    val sequence: Long?,
+)
+
 internal object QqBotWebSocketProtocol {
     private val json = Json {
         ignoreUnknownKeys = true
@@ -103,6 +108,31 @@ internal object QqBotWebSocketProtocol {
         )
     }
 
+    fun resumePayload(
+        accessToken: String,
+        sessionId: String,
+        sequence: Long,
+    ): String {
+        val trimmedToken = accessToken.trim()
+        val trimmedSessionId = sessionId.trim()
+        require(trimmedToken.isNotBlank()) { "QQ 官方机器人访问令牌不能为空" }
+        require(trimmedSessionId.isNotBlank()) { "QQ 官方机器人 session_id 不能为空" }
+
+        return json.encodeToString(
+            buildJsonObject {
+                put("op", JsonPrimitive(QqBotOpcode.RESUME.code))
+                put(
+                    "d",
+                    buildJsonObject {
+                        put("token", JsonPrimitive("QQBot $trimmedToken"))
+                        put("session_id", JsonPrimitive(trimmedSessionId))
+                        put("seq", JsonPrimitive(sequence))
+                    },
+                )
+            },
+        )
+    }
+
     fun parseFrame(payload: String): QqBotWebSocketFrame {
         val root = json.parseToJsonElement(payload).jsonObject
         val opcodeCode = root["op"]?.jsonPrimitive?.intOrNull
@@ -143,6 +173,21 @@ internal object QqBotWebSocketProtocol {
         )
     }
 
+    fun parseReadySession(dispatch: QqBotDispatchEvent): QqBotReadySession {
+        require(dispatch.type == QQBOT_READY_EVENT) { "QQ 官方机器人 Dispatch 包不是 READY：type=${dispatch.type}" }
+        val sessionId = dispatch.data
+            .jsonObject["session_id"]
+            ?.jsonPrimitive
+            ?.contentOrNull
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?: throw IllegalArgumentException("QQ 官方机器人 READY 事件缺少 session_id")
+        return QqBotReadySession(
+            sessionId = sessionId,
+            sequence = dispatch.sequence,
+        )
+    }
+
     fun incomingEventOrNull(payload: String, botAccountId: String? = null): QqBotIncomingEvent? {
         val frame = parseFrame(payload)
         if (frame.opcode != QqBotOpcode.DISPATCH) return null
@@ -156,3 +201,6 @@ internal object QqBotWebSocketProtocol {
             .ifBlank { "unknown" }
     }
 }
+
+internal const val QQBOT_READY_EVENT: String = "READY"
+internal const val QQBOT_RESUMED_EVENT: String = "RESUMED"

@@ -6,7 +6,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import top.colter.dynamic.core.data.CommandTarget
 import top.colter.dynamic.core.data.DeliveryStatus
-import top.colter.dynamic.core.data.IncomingMessage
 import top.colter.dynamic.core.data.MediaKind
 import top.colter.dynamic.core.data.MediaRef
 import top.colter.dynamic.core.data.Message
@@ -239,30 +238,17 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
-    fun `发送命令结果时使用追踪上下文作为官方被动回复 ID`() = runBlocking {
+    fun `发送命令结果时使用请求回复目标作为官方被动回复 ID`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway()
-        val replyContexts = QqBotReplyContextStore(nowMillis = { 1_000L })
-        replyContexts.remember(
-            traceId = "trace-id",
-            incoming = IncomingMessage(
-                platformId = QQBOT_PLATFORM_ID,
-                target = TargetAddress.of("qq", TargetKind.GROUP, "group-openid", accountId = "app-id"),
-                senderId = "member-openid",
-                botAccountId = "app-id",
-                messageId = "group-msg-1",
-                text = "@bot ping",
-            ),
-        )
         plugin.setPrivate("gateway", gateway)
-        plugin.setPrivate("replyContextStore", replyContexts)
         plugin.setPrivate("running", true)
 
         val result = plugin.sendCommandResult(
             request = CommandResultSendRequest(
                 target = CommandTarget(TargetAddress.of("qq", TargetKind.GROUP, "group-openid"), senderId = "member-openid"),
                 chain = listOf(MessageBatch(listOf(MessageContent.Text("pong")))),
-                inReplyTo = "trace-id",
+                inReplyTo = "group-msg-1",
             ),
             routeId = "qqbot:qq:app-id",
         )

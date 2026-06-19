@@ -2,7 +2,7 @@
 
 QQ 官方机器人插件，用于通过 QQ 官方 API v2 接入 dynamic-bot。
 
-当前已接入 WebSocket 网关能力：可获取访问令牌与网关地址、连接官方 WebSocket、处理 Hello 后 Identify、发送心跳并分发 Dispatch 事件；已支持将单聊/群聊消息事件映射为 dynamic-bot 入站消息，并可通过 OpenAPI 发送、撤回单聊/群聊文本消息。WebSocket 断开后支持基础自动重连，并会在 READY 后记录 `session_id`，重连时优先尝试 Resume；图片、视频、语音已支持使用 HTTP(S) URL 或 `base64://` 数据先登记富媒体资源再发送。
+当前已接入 WebSocket 网关能力：可获取访问令牌与网关地址、连接官方 WebSocket、处理 Hello 后 Identify、发送心跳并分发 Dispatch 事件；已支持将单聊/群聊消息事件映射为 dynamic-bot 标准入站消息，并可通过 OpenAPI 发送、撤回单聊/群聊文本消息。WebSocket 断开后支持基础自动重连，并会在 READY 后记录 `session_id`，重连时优先尝试 Resume；图片、视频、语音已支持使用 HTTP(S) URL 或 `base64://` 数据先登记富媒体资源再发送。
 
 ## 当前包含
 
@@ -15,6 +15,7 @@ QQ 官方机器人插件，用于通过 QQ 官方 API v2 接入 dynamic-bot。
 - 访问令牌获取、缓存刷新、`/gateway/bot` 接入点获取组件。
 - 基于 Java 标准库 `java.net.http.WebSocket` 的正向 WebSocket 网关实现。
 - 单聊/群聊文本消息发送、URL/base64 富媒体发送、命令结果发送与消息撤回。
+- 入站消息提交到主项目统一管线，由主项目识别命令、链接和普通消息。
 - 富媒体 `/files` 请求模型已支持 `file_data` base64 字段；媒体投递建议会禁用本地文件直传，引导主程序自动落到 base64 兜底。
 - 目标列表的接口骨架。
 - 插件边界测试，避免直接依赖主程序运行时实现。
@@ -24,7 +25,7 @@ QQ 官方机器人插件，用于通过 QQ 官方 API v2 接入 dynamic-bot。
 1. 使用 `AppID` 和 `AppSecret` 获取访问令牌。
 2. 通过 `/gateway` 或 `/gateway/bot` 获取 WebSocket 地址。
 3. 连接 QQ 官方 WebSocket，处理 Hello、Identify、Heartbeat、Dispatch。
-4. 将 `C2C_MESSAGE_CREATE`、`GROUP_MESSAGE_CREATE` 和 `GROUP_AT_MESSAGE_CREATE` 映射为 dynamic-bot 入站消息。
+4. 将 `C2C_MESSAGE_CREATE`、`GROUP_MESSAGE_CREATE` 和 `GROUP_AT_MESSAGE_CREATE` 映射为 dynamic-bot 标准入站消息。
 5. 文本消息直接调用 OpenAPI 回复单聊和群聊。
 6. 图片、视频、语音先调用 `/files` 登记 HTTP(S) URL 或 `base64://` 数据，拿到 `file_info` 后用 `msg_type = 7` 发送。
 7. 官网当前富媒体文档已列出 `file_data` base64 字段，但 `url` 仍标记必填；仅传 `file_data` 的正式环境兼容性仍需实测确认。
@@ -52,6 +53,8 @@ intents:
 reconnect: true
 autoPublishIncoming: true
 ```
+
+`autoPublishIncoming` 开启后，插件只发布标准入站消息；命令前缀匹配、群聊开头 at 当前 Bot 的规范化、链接识别和普通消息插件过滤都由主项目管线完成。平台原始消息 ID 会作为回复目标传入命令结果发送链路，便于 QQ 官方接口按原消息回复。
 
 ## 连通性调试
 

@@ -13,11 +13,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
-import kotlin.test.assertTrue
-import top.colter.dynamic.core.command.CommandPublishRequest
-import top.colter.dynamic.core.command.CommandPublisher
-import top.colter.dynamic.core.data.IncomingMessage
-import top.colter.dynamic.core.data.TargetKind
+import top.colter.dynamic.core.plugin.IncomingMessagePublishRequest
 import top.colter.dynamic.core.plugin.IncomingMessagePublisher
 import top.colter.dynamic.core.plugin.MessageSinkRouteState
 
@@ -28,13 +24,13 @@ class QqBotGatewayPluginIncomingTest {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val publishStarted = CompletableDeferred<Unit>()
         val releasePublish = CompletableDeferred<Unit>()
-        val published = CompletableDeferred<IncomingMessage>()
+        val published = CompletableDeferred<IncomingMessagePublishRequest>()
         plugin.prepareIncomingTest(
             scope = scope,
-            publishIncoming = { message ->
+            publishIncoming = { request ->
                 publishStarted.complete(Unit)
                 releasePublish.await()
-                published.complete(message)
+                published.complete(request)
             },
         )
 
@@ -49,7 +45,10 @@ class QqBotGatewayPluginIncomingTest {
             assertFalse(published.isCompleted)
 
             releasePublish.complete(Unit)
-            assertEquals("msg-1", withTimeout(500) { published.await() }.messageId)
+            val request = withTimeout(500) { published.await() }
+            assertEquals("msg-1", request.message.messageId)
+            assertEquals("msg-1", request.traceId)
+            assertEquals("msg-1", request.replyToMessageId)
         } finally {
             plugin.callPrivate("stopIncomingScope")
             scope.cancel()
@@ -60,10 +59,10 @@ class QqBotGatewayPluginIncomingTest {
     fun `关闭自动发布时忽略入站事件`() = runBlocking {
         val plugin = QqBotGatewayPlugin()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val published = CompletableDeferred<IncomingMessage>()
+        val published = CompletableDeferred<IncomingMessagePublishRequest>()
         plugin.prepareIncomingTest(
             scope = scope,
-            publishIncoming = { message -> published.complete(message) },
+            publishIncoming = { request -> published.complete(request) },
         )
 
         try {
@@ -83,11 +82,11 @@ class QqBotGatewayPluginIncomingTest {
     fun `调试回显命中文本时发送官方被动回复`() = runBlocking {
         val plugin = QqBotGatewayPlugin()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val published = CompletableDeferred<IncomingMessage>()
+        val published = CompletableDeferred<IncomingMessagePublishRequest>()
         val gateway = FakeGateway()
         plugin.prepareIncomingTest(
             scope = scope,
-            publishIncoming = { message -> published.complete(message) },
+            publishIncoming = { request -> published.complete(request) },
         )
 
         try {
@@ -265,15 +264,13 @@ class QqBotGatewayPluginIncomingTest {
     }
 
     @Test
-    fun `入站事件应发布命令请求`() = runBlocking {
+    fun `群 at 事件应发布标准入站消息`() = runBlocking {
         val plugin = QqBotGatewayPlugin()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val publishedIncoming = CompletableDeferred<IncomingMessage>()
-        val publishedCommand = CompletableDeferred<CommandPublishRequest>()
+        val publishedIncoming = CompletableDeferred<IncomingMessagePublishRequest>()
         plugin.prepareIncomingTest(
             scope = scope,
-            publishIncoming = { message -> publishedIncoming.complete(message) },
-            publishCommand = { request -> publishedCommand.complete(request) },
+            publishIncoming = { request -> publishedIncoming.complete(request) },
         )
 
         try {
@@ -281,19 +278,17 @@ class QqBotGatewayPluginIncomingTest {
 
             plugin.invokeIncoming(groupEvent())
 
-            val incoming = withTimeout(500) { publishedIncoming.await() }
-            val command = withTimeout(500) { publishedCommand.await() }
+            val request = withTimeout(500) { publishedIncoming.await() }
+            val incoming = request.message
             assertEquals("group-msg-1", incoming.messageId)
-            assertEquals(QQBOT_PLUGIN_ID, command.sourcePlugin)
-            assertEquals("ping", command.rawText)
-            assertTrue(command.traceId.isNotBlank())
-            assertEquals("qq", command.context.platform)
-            assertEquals(TargetKind.GROUP, command.context.chatType)
-            assertEquals("group-openid", command.context.chatId)
-            assertEquals("member-openid", command.context.senderId)
-            assertEquals("bot-app-id", command.context.botAccountId)
-            assertEquals("bot-app-id", command.context.target.accountId)
-            assertEquals(setOf("bot-app-id"), command.context.mentionedAccountIds)
+            assertEquals("group-msg-1", request.traceId)
+            assertEquals("group-msg-1", request.replyToMessageId)
+            assertEquals("@bot ping", incoming.text)
+            assertEquals("group-openid", incoming.target.externalId)
+            assertEquals("member-openid", incoming.senderId)
+            assertEquals("bot-app-id", incoming.botAccountId)
+            assertEquals("bot-app-id", incoming.target.accountId)
+            assertEquals(setOf("bot-app-id"), incoming.mentions)
         } finally {
             plugin.callPrivate("stopIncomingScope")
             scope.cancel()
@@ -304,11 +299,10 @@ class QqBotGatewayPluginIncomingTest {
     fun `群普通消息 at 当前机器人时应发布可被主项目解析的命令文本`() = runBlocking {
         val plugin = QqBotGatewayPlugin()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val publishedCommand = CompletableDeferred<CommandPublishRequest>()
+        val publishedIncoming = CompletableDeferred<IncomingMessagePublishRequest>()
         plugin.prepareIncomingTest(
             scope = scope,
-            publishIncoming = {},
-            publishCommand = { request -> publishedCommand.complete(request) },
+            publishIncoming = { request -> publishedIncoming.complete(request) },
         )
 
         try {
@@ -316,12 +310,11 @@ class QqBotGatewayPluginIncomingTest {
 
             plugin.invokeIncoming(groupMessageEvent(content = "<@bot-member-openid> /db help"))
 
-            val command = withTimeout(500) { publishedCommand.await() }
-            assertEquals("/db help", command.rawText)
-            assertEquals(TargetKind.GROUP, command.context.chatType)
-            assertEquals("bot-app-id", command.context.botAccountId)
-            assertEquals("bot-app-id", command.context.target.accountId)
-            assertEquals(setOf("bot-app-id"), command.context.mentionedAccountIds)
+            val incoming = withTimeout(500) { publishedIncoming.await() }.message
+            assertEquals("<@bot-member-openid> /db help", incoming.text)
+            assertEquals("bot-app-id", incoming.botAccountId)
+            assertEquals("bot-app-id", incoming.target.accountId)
+            assertEquals(setOf("bot-app-id"), incoming.mentions)
         } finally {
             plugin.callPrivate("stopIncomingScope")
             scope.cancel()
@@ -332,11 +325,10 @@ class QqBotGatewayPluginIncomingTest {
     fun `私聊命令上下文应视为发给当前机器人`() = runBlocking {
         val plugin = QqBotGatewayPlugin()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val publishedCommand = CompletableDeferred<CommandPublishRequest>()
+        val publishedIncoming = CompletableDeferred<IncomingMessagePublishRequest>()
         plugin.prepareIncomingTest(
             scope = scope,
-            publishIncoming = {},
-            publishCommand = { request -> publishedCommand.complete(request) },
+            publishIncoming = { request -> publishedIncoming.complete(request) },
         )
 
         try {
@@ -344,12 +336,10 @@ class QqBotGatewayPluginIncomingTest {
 
             plugin.invokeIncoming(c2cEvent(content = "/db help"))
 
-            val command = withTimeout(500) { publishedCommand.await() }
-            assertEquals("/db help", command.rawText)
-            assertEquals(TargetKind.USER, command.context.chatType)
-            assertEquals("bot-app-id", command.context.botAccountId)
-            assertEquals("bot-app-id", command.context.target.accountId)
-            assertEquals(setOf("bot-app-id"), command.context.mentionedAccountIds)
+            val incoming = withTimeout(500) { publishedIncoming.await() }.message
+            assertEquals("/db help", incoming.text)
+            assertEquals("bot-app-id", incoming.botAccountId)
+            assertEquals("bot-app-id", incoming.target.accountId)
         } finally {
             plugin.callPrivate("stopIncomingScope")
             scope.cancel()
@@ -357,15 +347,13 @@ class QqBotGatewayPluginIncomingTest {
     }
 
     @Test
-    fun `空白入站文本不发布命令请求`() = runBlocking {
+    fun `空白入站文本仍发布入站消息`() = runBlocking {
         val plugin = QqBotGatewayPlugin()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val publishedIncoming = CompletableDeferred<IncomingMessage>()
-        val publishedCommand = CompletableDeferred<CommandPublishRequest>()
+        val publishedIncoming = CompletableDeferred<IncomingMessagePublishRequest>()
         plugin.prepareIncomingTest(
             scope = scope,
-            publishIncoming = { message -> publishedIncoming.complete(message) },
-            publishCommand = { request -> publishedCommand.complete(request) },
+            publishIncoming = { request -> publishedIncoming.complete(request) },
         )
 
         try {
@@ -373,8 +361,7 @@ class QqBotGatewayPluginIncomingTest {
 
             plugin.invokeIncoming(c2cEvent(content = "   "))
 
-            assertEquals("", withTimeout(500) { publishedIncoming.await() }.text)
-            assertNull(withTimeoutOrNull(200) { publishedCommand.await() })
+            assertEquals("", withTimeout(500) { publishedIncoming.await() }.message.text)
         } finally {
             plugin.callPrivate("stopIncomingScope")
             scope.cancel()
@@ -385,10 +372,10 @@ class QqBotGatewayPluginIncomingTest {
     fun `不支持的入站事件会被忽略`() = runBlocking {
         val plugin = QqBotGatewayPlugin()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val published = CompletableDeferred<IncomingMessage>()
+        val published = CompletableDeferred<IncomingMessagePublishRequest>()
         plugin.prepareIncomingTest(
             scope = scope,
-            publishIncoming = { message -> published.complete(message) },
+            publishIncoming = { request -> published.complete(request) },
         )
 
         try {
@@ -410,14 +397,12 @@ class QqBotGatewayPluginIncomingTest {
 
     private fun QqBotGatewayPlugin.prepareIncomingTest(
         scope: CoroutineScope,
-        publishIncoming: suspend (IncomingMessage) -> Unit,
-        publishCommand: suspend (CommandPublishRequest) -> Unit = {},
+        publishIncoming: suspend (IncomingMessagePublishRequest) -> Unit,
     ) {
         setPrivate("pluginId", QQBOT_PLUGIN_ID)
         setPrivate("config", QqBotConfig())
         setPrivate("pluginScope", scope)
-        setPrivate("incomingMessagePublisher", IncomingMessagePublisher { message -> publishIncoming(message) })
-        setPrivate("commandPublisher", CommandPublisher { request -> publishCommand(request) })
+        setPrivate("incomingMessagePublisher", IncomingMessagePublisher { request -> publishIncoming(request) })
         callPrivate("startIncomingScope")
     }
 

@@ -1,5 +1,6 @@
 package top.colter.dynamic.qqbot
 
+import java.security.MessageDigest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -300,8 +301,11 @@ public class QqBotGatewayPlugin :
                 incomingMessagePublisher.publish(
                     IncomingMessagePublishRequest(
                         message = incoming,
-                        traceId = incoming.messageId,
+                        traceId = event.traceId(incoming),
                         replyToMessageId = incoming.messageId,
+                        receivedAtEpochSeconds = System.currentTimeMillis() / 1000,
+                        sourceEventId = event.sourceEventId(incoming.messageId),
+                        dedupeKey = event.dedupeKey(incoming),
                     ),
                 )
                 logger.info {
@@ -324,6 +328,25 @@ public class QqBotGatewayPlugin :
         if (matchesDebugImageEcho(incoming)) {
             sendDebugImageEcho(incoming, scope, msgSeq = nextMsgSeq)
         }
+    }
+
+    private fun QqBotIncomingEvent.sourceEventId(messageId: String): String {
+        return listOf(type, messageId).joinToString(":")
+    }
+
+    private fun QqBotIncomingEvent.dedupeKey(incoming: IncomingMessage): String {
+        return listOf(
+            QQBOT_PLUGIN_ID,
+            botAccountId.orEmpty(),
+            type,
+            incoming.target.kind.name,
+            incoming.target.externalId,
+            incoming.messageId,
+        ).joinToString(":")
+    }
+
+    private fun QqBotIncomingEvent.traceId(incoming: IncomingMessage): String {
+        return "${QQBOT_PLUGIN_ID}:${dedupeKey(incoming).sha256Hex()}"
     }
 
     private fun matchesDebugTextEcho(incoming: IncomingMessage): Boolean {
@@ -542,6 +565,11 @@ public class QqBotGatewayPlugin :
             else -> "unknown"
         }
     }
+}
+
+private fun String.sha256Hex(): String {
+    val digest = MessageDigest.getInstance("SHA-256").digest(toByteArray(Charsets.UTF_8))
+    return digest.joinToString("") { byte -> "%02x".format(byte) }
 }
 
 internal fun createQqBotGateway(config: QqBotConfig): QqBotGateway {

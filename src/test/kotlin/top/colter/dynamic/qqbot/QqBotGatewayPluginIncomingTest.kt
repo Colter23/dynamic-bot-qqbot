@@ -1,5 +1,6 @@
 package top.colter.dynamic.qqbot
 
+import java.security.MessageDigest
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -47,8 +48,11 @@ class QqBotGatewayPluginIncomingTest {
             releasePublish.complete(Unit)
             val request = withTimeout(500) { published.await() }
             assertEquals("msg-1", request.message.messageId)
-            assertEquals("msg-1", request.traceId)
             assertEquals("msg-1", request.replyToMessageId)
+            assertEquals("C2C_MESSAGE_CREATE:msg-1", request.sourceEventId)
+            assertEquals("qqbot-gateway:bot-app-id:C2C_MESSAGE_CREATE:USER:user-openid:msg-1", request.dedupeKey)
+            assertEquals("qqbot-gateway:${request.dedupeKey!!.sha256Hex()}", request.traceId)
+            assertEquals(true, request.receivedAtEpochSeconds != null && request.receivedAtEpochSeconds!! > 0)
         } finally {
             plugin.callPrivate("stopIncomingScope")
             scope.cancel()
@@ -281,8 +285,8 @@ class QqBotGatewayPluginIncomingTest {
             val request = withTimeout(500) { publishedIncoming.await() }
             val incoming = request.message
             assertEquals("group-msg-1", incoming.messageId)
-            assertEquals("group-msg-1", request.traceId)
             assertEquals("group-msg-1", request.replyToMessageId)
+            assertEquals("qqbot-gateway:${request.dedupeKey!!.sha256Hex()}", request.traceId)
             assertEquals("@bot ping", incoming.text)
             assertEquals("group-openid", incoming.target.externalId)
             assertEquals("member-openid", incoming.senderId)
@@ -564,4 +568,9 @@ class QqBotGatewayPluginIncomingTest {
         field.isAccessible = true
         field.set(this, value)
     }
+}
+
+private fun String.sha256Hex(): String {
+    val digest = MessageDigest.getInstance("SHA-256").digest(toByteArray(Charsets.UTF_8))
+    return digest.joinToString("") { byte -> "%02x".format(byte) }
 }

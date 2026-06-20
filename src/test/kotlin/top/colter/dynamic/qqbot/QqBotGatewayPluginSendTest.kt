@@ -4,20 +4,16 @@ import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
-import top.colter.dynamic.core.data.CommandTarget
-import top.colter.dynamic.core.data.DeliveryStatus
 import top.colter.dynamic.core.data.MediaKind
 import top.colter.dynamic.core.data.MediaRef
 import top.colter.dynamic.core.data.Message
 import top.colter.dynamic.core.data.MessageBatch
 import top.colter.dynamic.core.data.MessageContent
-import top.colter.dynamic.core.data.MessageDelivery
 import top.colter.dynamic.core.data.TargetAddress
 import top.colter.dynamic.core.data.TargetKind
-import top.colter.dynamic.core.plugin.CommandResultSendRequest
-import top.colter.dynamic.core.plugin.MessageDeliveryRequest
 import top.colter.dynamic.core.plugin.MessageRecallRequest
 import top.colter.dynamic.core.plugin.MessageRecallResult
+import top.colter.dynamic.core.plugin.MessageSendRequest
 import top.colter.dynamic.core.plugin.MessageSendResult
 import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryAdviceRequest
 import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryConfidence
@@ -223,11 +219,11 @@ class QqBotGatewayPluginSendTest {
         plugin.setPrivate("gateway", gateway)
         plugin.setPrivate("running", true)
 
-        val result = plugin.sendCommandResult(
-            request = CommandResultSendRequest(
-                target = CommandTarget(TargetAddress.of("qq", TargetKind.GROUP, "group-openid"), senderId = "member-openid"),
-                chain = listOf(MessageBatch(listOf(MessageContent.Text("ok")))),
-                inReplyTo = "trace-id",
+        val result = plugin.sendMessage(
+            request = sendRequest(
+                target = TargetAddress.of("qq", TargetKind.GROUP, "group-openid"),
+                batches = listOf(MessageBatch(listOf(MessageContent.Text("ok")))),
+                replyToMessageId = "trace-id",
             ),
             routeId = "qqbot:qq:app-id",
         )
@@ -244,11 +240,11 @@ class QqBotGatewayPluginSendTest {
         plugin.setPrivate("gateway", gateway)
         plugin.setPrivate("running", true)
 
-        val result = plugin.sendCommandResult(
-            request = CommandResultSendRequest(
-                target = CommandTarget(TargetAddress.of("qq", TargetKind.GROUP, "group-openid"), senderId = "member-openid"),
-                chain = listOf(MessageBatch(listOf(MessageContent.Text("pong")))),
-                inReplyTo = "group-msg-1",
+        val result = plugin.sendMessage(
+            request = sendRequest(
+                target = TargetAddress.of("qq", TargetKind.GROUP, "group-openid"),
+                batches = listOf(MessageBatch(listOf(MessageContent.Text("pong")))),
+                replyToMessageId = "group-msg-1",
             ),
             routeId = "qqbot:qq:app-id",
         )
@@ -357,31 +353,32 @@ class QqBotGatewayPluginSendTest {
         return this
     }
 
-    private fun deliveryRequest(target: TargetAddress, text: String): MessageDeliveryRequest {
-        return deliveryRequest(
+    private fun deliveryRequest(target: TargetAddress, text: String): MessageSendRequest {
+        return sendRequest(
             target = target,
             batches = listOf(MessageBatch(listOf(MessageContent.Text(text)))),
         )
     }
 
-    private fun deliveryRequest(target: TargetAddress, batches: List<MessageBatch>): MessageDeliveryRequest {
+    private fun deliveryRequest(target: TargetAddress, batches: List<MessageBatch>): MessageSendRequest {
+        return sendRequest(target = target, batches = batches)
+    }
+
+    private fun sendRequest(
+        target: TargetAddress,
+        batches: List<MessageBatch>,
+        replyToMessageId: String? = null,
+    ): MessageSendRequest {
         val message = Message(
             id = "message-1",
             time = 1,
             targets = listOf(target),
             batches = batches,
+            replyToMessageId = replyToMessageId,
         )
-        return MessageDeliveryRequest(
-            delivery = MessageDelivery(
-                id = 1,
-                messageId = message.id,
-                target = target,
-                status = DeliveryStatus.SENDING,
-                attempts = 1,
-                createdAtEpochSeconds = 1,
-                updatedAtEpochSeconds = 1,
-            ),
+        return MessageSendRequest(
             message = message,
+            target = target,
         )
     }
 

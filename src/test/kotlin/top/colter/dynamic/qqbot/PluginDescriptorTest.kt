@@ -12,6 +12,6 @@ class PluginDescriptorTest {
 
         assertTrue(content.contains("id: qqbot-gateway"))
         assertTrue(content.contains("mainClass: top.colter.dynamic.qqbot.QqBotGatewayPlugin"))
-        assertTrue(content.contains("apiVersion: 2.0.0"))
+        assertTrue(content.contains("apiVersion: 3.0.0"))
     }
 }

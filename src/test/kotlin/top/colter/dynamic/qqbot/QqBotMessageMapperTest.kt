@@ -12,6 +12,7 @@ import top.colter.dynamic.core.data.MediaKind
 import top.colter.dynamic.core.data.MediaRef
 import top.colter.dynamic.core.data.MessageBatch
 import top.colter.dynamic.core.data.MessageContent
+import top.colter.dynamic.core.data.TargetKind
 
 class QqBotMessageMapperTest {
     @Test
@@ -146,6 +147,48 @@ class QqBotMessageMapperTest {
         assertIs<QqBotSendPlanItem.Text>(plan[0])
         assertIs<QqBotSendPlanItem.Media>(plan[1])
         assertFalse(plan[0].request.msgSeq == plan[1].request.msgSeq)
+    }
+
+    @Test
+    fun `发送计划映射 Mention 为官方 at 协议`() {
+        val plan = QqBotMessageMapper.toSendPlan(
+            batches = listOf(
+                MessageBatch(
+                    listOf(
+                        MessageContent.Text("通知："),
+                        MessageContent.Mention(
+                            fallbackText = "@某用户",
+                            target = top.colter.dynamic.core.data.TargetAddress.of(
+                                platformId = "qq",
+                                kind = TargetKind.USER,
+                                externalId = "user-openid-1",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val textItem = assertIs<QqBotSendPlanItem.Text>(plan.single())
+        assertEquals(true, textItem.request.content.contains("""<qqbot-at-user id="user-openid-1" />"""))
+    }
+
+    @Test
+    fun `发送计划对 MentionAll 降级为纯文本`() {
+        val plan = QqBotMessageMapper.toSendPlan(
+            batches = listOf(
+                MessageBatch(
+                    listOf(
+                        MessageContent.Text("新动态来了"),
+                        MessageContent.MentionAll(fallbackText = ""),
+                    ),
+                ),
+            ),
+        )
+
+        val textItem = assertIs<QqBotSendPlanItem.Text>(plan.single())
+        assertEquals(true, textItem.request.content.contains("新动态来了"))
+        assertEquals(true, textItem.request.content.contains("@全体成员"))
     }
 
     private fun createTempImage(): Path {

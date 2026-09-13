@@ -127,6 +127,60 @@ class QqBotOpenApiClientTest {
     }
 
     @Test
+    fun `回复窗口过期等业务码判定为不可重试`() {
+        val nonRetryableCodes = listOf(
+            "304103", "40034005", "40034024", "40034025", "40034026", "40034027", "40034128",
+            "22006", "304061", "304080", "40054007", "40054010", "40054018", "50059",
+            "40034006", "40054002", "40054003", "40054013", "40034101",
+            "40054004", "40054005",
+            "850019", "850031",
+        )
+        val retryableCodes = listOf("11243", "40034100", "40093001", null, "")
+
+        nonRetryableCodes.forEach { code ->
+            val error = openApiException(code)
+            assertEquals(false, error.retryable, "业务码 $code 应判定为不可重试")
+        }
+        retryableCodes.forEach { code ->
+            val error = openApiException(code)
+            assertEquals(true, error.retryable, "业务码 $code 应保持可重试")
+        }
+    }
+
+    @Test
+    fun `发送异常类业务码判定为状态未知`() {
+        val unknownCodes = listOf("50055001", "50055002", "50055006")
+        val knownCodes = listOf("40034005", "40034100", null)
+
+        unknownCodes.forEach { code ->
+            assertEquals(true, openApiException(code).outcomeUnknown, "业务码 $code 应判定为状态未知")
+        }
+        knownCodes.forEach { code ->
+            assertEquals(false, openApiException(code).outcomeUnknown, "业务码 $code 不应判定为状态未知")
+        }
+    }
+
+    @Test
+    fun `上传通道临时故障码判定为可重试瞬态`() {
+        val transientCodes = listOf("40093001", "850026", "850027")
+        transientCodes.forEach { code ->
+            val error = openApiException(code)
+            assertEquals(true, error.transientUploadFailure, "业务码 $code 应判定为上传瞬态故障")
+            assertEquals(true, error.retryable, "上传瞬态故障应保持可重试")
+        }
+    }
+
+    private fun openApiException(code: String?): QqBotOpenApiException {
+        return QqBotOpenApiException(
+            action = "发送 QQ 官方机器人消息",
+            statusCode = 400,
+            code = code,
+            message = "业务错误",
+            body = """{"err_code":"$code"}""",
+        )
+    }
+
+    @Test
     fun `网关接入点拒绝缺失 url 的响应`() {
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(

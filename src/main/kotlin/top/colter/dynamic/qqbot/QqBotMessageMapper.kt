@@ -13,6 +13,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import top.colter.dynamic.core.data.IncomingMessage
 import top.colter.dynamic.core.data.IncomingMessageSegment
 import top.colter.dynamic.core.data.MessageBatch
@@ -26,6 +27,14 @@ internal data class QqBotSendRequest(
     val replyToMessageId: String? = null,
     val msgSeq: Int = 1,
     val mediaFileInfo: String? = null,
+)
+
+/** 入站事件中提取的消息目标 sighting，供目标账本记录。 */
+internal data class QqBotTargetSighting(
+    val kind: TargetKind,
+    val externalId: String,
+    val event: String,
+    val timestampEpochSeconds: Long,
 )
 
 internal data class QqBotSendReceipt(
@@ -132,17 +141,27 @@ internal object QqBotMessageMapper {
 
             batch.content.forEach { content ->
                 val media = content.toMediaCandidate()
-                if (media != null) {
-                    mediaCandidates += media
-                    if (media.source == null) {
-                        textParts += media.fallbackText.ifBlank {
-                            "（暂不支持发送${media.fileType.label}，请使用 HTTP(S) URL 或本地文件）"
+                when {
+                    media != null -> {
+                        mediaCandidates += media
+                        if (media.source == null) {
+                            textParts += media.fallbackText.ifBlank {
+                                "（暂不支持发送${media.fileType.label}，请使用 HTTP(S) URL 或本地文件）"
+                            }
+                        } else {
+                            textParts += media.fallbackText
                         }
-                    } else {
-                        textParts += media.fallbackText
                     }
-                } else {
-                    textParts += content.fallbackText
+                    // 官方 at 协议：<qqbot-at-user id=""/>（群聊/单聊可用，<@userid> 已弃用）
+                    content is MessageContent.Mention && content.target.externalId.isNotBlank() -> {
+                        textParts += content.mentionSyntax(content.target.externalId)
+                            .takeIf { it.isNotBlank() } ?: content.fallbackText
+                    }
+                    // 官方群聊不支持 @全体成员：降级为纯文本，避免静默丢失
+                    content is MessageContent.MentionAll -> {
+                        textParts += content.fallbackText.ifBlank { QQBOT_MENTION_ALL_FALLBACK }
+                    }
+                    else -> textParts += content.fallbackText
                 }
             }
 
@@ -203,6 +222,13 @@ internal object QqBotMessageMapper {
         return mapNotNull { it.trim().takeIf(String::isNotBlank) }
             .joinToString(separator = "\n")
             .trim()
+    }
+
+    /** 官方 at 协议语法；openid 为空时返回空串，由调用方回退到 fallbackText。 */
+    private fun MessageContent.mentionSyntax(openid: String): String {
+        val id = openid.trim()
+        if (id.isBlank()) return ""
+        return "<qqbot-at-user id=\"$id\" />"
     }
 
     private fun List<MessageBatch>.firstReplyMessageId(): String? {
@@ -286,12 +312,50 @@ internal object QqBotIncomingMessageMapper {
         }
     }
 
+    /**
+     * 从任意入站事件中提取"消息目标 sighting"，供目标账本记录。
+     *
+     * 覆盖三类：
+     * - 消息事件（单聊/群聊）：机器人收到的消息必然来自可触达目标；
+     * - 群/好友生命周期（加入/移出、添加/删除）：触发时可确知关系存续或断开；
+     * - 主动消息开关（RECEIVE/REJECT）：开关事件证明该目标存在。
+     *
+     * 返回 null 表示事件与目标发现无关。
+     */
+    fun toTargetSighting(event: QqBotIncomingEvent): QqBotTargetSighting? {
+        val dispatch = runCatching { QqBotWebSocketProtocol.parseDispatch(event.rawPayload) }.getOrNull()
+            ?: return null
+        val data = dispatch.data.jsonObject
+        val timestamp = data.longOf("timestamp") ?: 0L
+        return when (event.type) {
+            QQBOT_C2C_MESSAGE_CREATE -> data.jsonString("author", "user_openid")
+                ?.let { QqBotTargetSighting(TargetKind.USER, it, event.type, timestamp) }
+            QQBOT_GROUP_AT_MESSAGE_CREATE,
+            QQBOT_GROUP_MESSAGE_CREATE,
+            -> data.jsonString("group_openid")
+                ?.let { QqBotTargetSighting(TargetKind.GROUP, it, event.type, timestamp) }
+            QQBOT_GROUP_ADD_ROBOT,
+            QQBOT_GROUP_DEL_ROBOT,
+            QQBOT_GROUP_MSG_RECEIVE,
+            QQBOT_GROUP_MSG_REJECT,
+            -> data.jsonString("group_openid")
+                ?.let { QqBotTargetSighting(TargetKind.GROUP, it, event.type, timestamp) }
+            QQBOT_FRIEND_ADD,
+            QQBOT_FRIEND_DEL,
+            QQBOT_C2C_MSG_RECEIVE,
+            QQBOT_C2C_MSG_REJECT,
+            -> data.jsonString("openid")
+                ?.let { QqBotTargetSighting(TargetKind.USER, it, event.type, timestamp) }
+            else -> null
+        }
+    }
+
     private fun JsonObject.toC2cIncoming(event: QqBotIncomingEvent): IncomingMessage? {
         val senderId = jsonString("author", "user_openid") ?: jsonString("author", "openid") ?: return null
         val messageId = jsonString("id")
         val content = jsonString("content").orEmpty()
         val attachments = attachments()
-        val segments = buildSegments(content, attachments)
+        val segments = buildSegments(content, attachments, arkLink = arkLinkSegment(event))
         return IncomingMessage(
             platformId = QQBOT_PLATFORM_ID,
             target = TargetAddress.of(
@@ -320,7 +384,7 @@ internal object QqBotIncomingMessageMapper {
         val content = jsonString("content").orEmpty()
         val attachments = attachments()
         val mentionItems = mentionItems(event)
-        val segments = buildSegments(content, attachments, mentionItems)
+        val segments = buildSegments(content, attachments, mentionItems, arkLink = arkLinkSegment(event))
         val mentions = mentionItems.mentionedAccountIds(event, mentionedBot)
         return IncomingMessage(
             platformId = QQBOT_PLATFORM_ID,
@@ -356,13 +420,21 @@ internal object QqBotIncomingMessageMapper {
         content: String,
         attachments: List<QqBotIncomingAttachment>,
         mentions: List<QqBotIncomingMention> = emptyList(),
+        arkLink: IncomingMessageSegment.Link? = null,
     ): List<IncomingMessageSegment> {
         return buildList {
             addAll(content.toTextAndMentionSegments(mentions))
             attachments.forEach { attachment ->
                 add(attachment.toSegment())
             }
+            if (arkLink != null) add(arkLink)
         }
+    }
+
+    /** `message_type=3` 的卡片消息：从 `ark_data.fields` 提取明确跳转链接。 */
+    private fun JsonObject.arkLinkSegment(event: QqBotIncomingEvent): IncomingMessageSegment.Link? {
+        val arkData = get("ark_data") ?: return null
+        return QqBotArkLinkExtractor.extract(arkData, event.rawPayload)
     }
 
     private fun String.toTextAndMentionSegments(mentions: List<QqBotIncomingMention>): List<IncomingMessageSegment> {
@@ -462,6 +534,12 @@ internal object QqBotIncomingMessageMapper {
             ?.takeIf { it.isNotBlank() }
     }
 
+    private fun JsonObject.longOf(name: String): Long? {
+        return get(name)
+            ?.jsonPrimitive
+            ?.let { primitive -> primitive.longOrNull ?: primitive.contentOrNull?.toLongOrNull() }
+    }
+
     private fun JsonObject.jsonString(parent: String, name: String): String? {
         return get(parent)
             ?.jsonObject
@@ -486,7 +564,16 @@ internal const val QQBOT_RAW_FORMAT: String = "qqbot-api-v2-dispatch-json"
 internal const val QQBOT_C2C_MESSAGE_CREATE: String = "C2C_MESSAGE_CREATE"
 internal const val QQBOT_GROUP_AT_MESSAGE_CREATE: String = "GROUP_AT_MESSAGE_CREATE"
 internal const val QQBOT_GROUP_MESSAGE_CREATE: String = "GROUP_MESSAGE_CREATE"
+internal const val QQBOT_GROUP_ADD_ROBOT: String = "GROUP_ADD_ROBOT"
+internal const val QQBOT_GROUP_DEL_ROBOT: String = "GROUP_DEL_ROBOT"
+internal const val QQBOT_FRIEND_ADD: String = "FRIEND_ADD"
+internal const val QQBOT_FRIEND_DEL: String = "FRIEND_DEL"
+internal const val QQBOT_C2C_MSG_RECEIVE: String = "C2C_MSG_RECEIVE"
+internal const val QQBOT_C2C_MSG_REJECT: String = "C2C_MSG_REJECT"
+internal const val QQBOT_GROUP_MSG_RECEIVE: String = "GROUP_MSG_RECEIVE"
+internal const val QQBOT_GROUP_MSG_REJECT: String = "GROUP_MSG_REJECT"
 internal const val QQBOT_TEXT_MSG_TYPE: Int = 0
 internal const val QQBOT_MEDIA_MSG_TYPE: Int = 7
 private const val QQBOT_EMPTY_MESSAGE_TEXT: String = "（空消息）"
+private const val QQBOT_MENTION_ALL_FALLBACK: String = "@全体成员"
 private val QQBOT_OFFICIAL_MENTION_PATTERN: Regex = Regex("""<@([^>]+)>""")

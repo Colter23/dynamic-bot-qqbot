@@ -518,7 +518,39 @@ internal class QqBotOpenApiException(
         append(" 消息=")
         append(message)
     },
-)
+) {
+    /**
+     * 该错误是否值得自动重试。
+     *
+     * 官方业务码语义参见 qqbot-wiki-md 错误码表；未识别的码默认可重试，
+     * 已知不可恢复的码（回复窗口过期、参数无效、内容违规、拒收、禁言等）直接终态失败，
+     * 避免主项目 outbox 反复撞同一面墙。
+     */
+    val retryable: Boolean
+        get() = when (code) {
+            // 回复窗口/事件回复过期或超限：重试必然再失败
+            "304103", "40034005", "40034024", "40034025", "40034026", "40034027", "40034128" -> false
+            // 参数与内容类错误：修正前重试无意义
+            "22006", "304061", "304080", "40054007", "40054010", "40054018", "50059" -> false
+            // 内容违规、用户拒收、机器人被禁言/移出群：需要人工介入
+            "40034006", "40054002", "40054003", "40054013", "40034101" -> false
+            // 好友关系不存在：非重试可解
+            "40054004" -> false
+            // 消息被去重（msg_id+msg_seq 重复）：换 seq 重发才有意义，主项目重试无解
+            "40054005" -> false
+            // 上传大小超限、格式不支持：终态失败
+            "850019", "850031" -> false
+            else -> true
+        }
+
+    /** 官方明示"发送异常，请稍后重试"的码：无法确认服务器是否已受理，按状态未知处理。 */
+    val outcomeUnknown: Boolean
+        get() = code in setOf("50055001", "50055002", "50055006")
+
+    /** 上传/下载通道的临时故障：官方建议重试。 */
+    val transientUploadFailure: Boolean
+        get() = code in setOf("40093001", "850026", "850027")
+}
 
 internal interface QqBotHttpTransport {
     fun postJson(url: String, headers: Map<String, String>, body: String): QqBotHttpResponse

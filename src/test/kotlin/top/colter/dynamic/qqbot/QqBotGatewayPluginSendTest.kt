@@ -280,6 +280,90 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
+    fun `发送超时上报状态未知而非可重试失败`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FailingGateway(java.net.http.HttpTimeoutException("请求超时"))
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendMessage(
+            request = deliveryRequest(TargetAddress.of("qq", TargetKind.GROUP, "group-openid"), "hello"),
+            routeId = "qqbot:qq:app-id",
+        )
+
+        val uncertain = assertIs<MessageSendResult.Uncertain>(result)
+        assertEquals("请求超时", uncertain.reason)
+        assertEquals("qqbot", uncertain.sinkTransportId)
+    }
+
+    @Test
+    fun `业务错误码判定为不可重试时透传终态失败`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FailingGateway(
+            QqBotOpenApiException(
+                action = "发送 QQ 官方机器人消息",
+                statusCode = 400,
+                code = "40034005",
+                message = "回复消息msg_id已过期",
+                body = "",
+            ),
+        )
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendMessage(
+            request = deliveryRequest(TargetAddress.of("qq", TargetKind.GROUP, "group-openid"), "hello"),
+            routeId = "qqbot:qq:app-id",
+        )
+
+        val failed = assertIs<MessageSendResult.Failed>(result)
+        assertEquals(false, failed.retryable)
+        assertEquals(true, failed.reason.contains("回复消息msg_id已过期"))
+    }
+
+    @Test
+    fun `官方发送异常码上报状态未知`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FailingGateway(
+            QqBotOpenApiException(
+                action = "发送 QQ 官方机器人消息",
+                statusCode = 500,
+                code = "50055002",
+                message = "消息发送异常，请稍后重试",
+                body = "",
+            ),
+        )
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendMessage(
+            request = deliveryRequest(TargetAddress.of("qq", TargetKind.USER, "user-openid"), "hello"),
+            routeId = "qqbot:qq:app-id",
+        )
+
+        assertIs<MessageSendResult.Uncertain>(result)
+    }
+
+    @Test
+    fun `被动回复重试时按已用 msgSeq 续编`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val request = sendRequest(
+            target = TargetAddress.of("qq", TargetKind.GROUP, "group-openid"),
+            batches = listOf(MessageBatch(listOf(MessageContent.Text("回复")))),
+            replyToMessageId = "group-msg-9",
+        )
+        plugin.sendMessage(request, routeId = "qqbot:qq:app-id")
+        plugin.sendMessage(request, routeId = "qqbot:qq:app-id")
+
+        assertEquals(listOf(1, 2), gateway.sentRequests.map { it.msgSeq })
+        assertEquals(listOf("group-msg-9", "group-msg-9"), gateway.sentRequests.map { it.replyToMessageId })
+    }
+
+    @Test
     fun `撤回单聊消息`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway()
@@ -472,6 +556,54 @@ class QqBotGatewayPluginSendTest {
 
         private fun QqBotMediaResourceSource.debugValue(): String {
             return url ?: localFile?.fileName?.toString().orEmpty()
+        }
+    }
+
+    private class FailingGateway(
+        private val error: Throwable,
+    ) : QqBotGateway {
+        override suspend fun connect(onIncomingEvent: (QqBotIncomingEvent) -> Unit) {
+        }
+
+        override suspend fun availableAccounts(): List<QqBotRuntimeAccount> {
+            return listOf(QqBotRuntimeAccount(accountId = "app-id", name = "测试 Bot"))
+        }
+
+        override suspend fun sendUserMessage(
+            accountId: String,
+            openid: String,
+            request: QqBotSendRequest,
+        ): QqBotSendReceipt = throw error
+
+        override suspend fun sendGroupMessage(
+            accountId: String,
+            groupOpenid: String,
+            request: QqBotSendRequest,
+        ): QqBotSendReceipt = throw error
+
+        override suspend fun sendUserMediaMessage(
+            accountId: String,
+            openid: String,
+            media: QqBotMediaResourceSource,
+            request: QqBotSendRequest,
+        ): QqBotSendReceipt = throw error
+
+        override suspend fun sendGroupMediaMessage(
+            accountId: String,
+            groupOpenid: String,
+            media: QqBotMediaResourceSource,
+            request: QqBotSendRequest,
+        ): QqBotSendReceipt = throw error
+
+        override suspend fun recallUserMessage(accountId: String, openid: String, messageId: String) {
+            throw error
+        }
+
+        override suspend fun recallGroupMessage(accountId: String, groupOpenid: String, messageId: String) {
+            throw error
+        }
+
+        override fun close() {
         }
     }
 }

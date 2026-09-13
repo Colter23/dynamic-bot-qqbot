@@ -55,6 +55,8 @@ public class QqBotGatewayPlugin :
     private var incomingScope: CoroutineScope? = null
     private var incomingJob: Job? = null
     private var running: Boolean = false
+    private val retryReplySeqKeeper = QqBotReplySeqKeeper()
+    private var targetLedger: QqBotTargetLedger? = null
 
     override val configId: String
         get() = pluginId
@@ -75,7 +77,12 @@ public class QqBotGatewayPlugin :
         pluginScope = context.scope
         config = context.configService.loadOrCreate(pluginId, QqBotConfigForm.migrations) { QqBotConfig() }
         QqBotConfigForm.validate(config)
-        logger.info { "QQ 官方机器人配置已加载：pluginId=$pluginId enabled=${config.enabled}" }
+        targetLedger = runCatching {
+            QqBotTargetLedger(dataStore = context.dataStore, pluginId = pluginId)
+        }.onFailure { error ->
+            logger.warn(error) { "QQ 官方机器人目标账本初始化失败，目标列表将从空开始积累" }
+        }.getOrNull()
+        logger.info { "QQ 官方机器人配置已加载：pluginId=$pluginId enabled=${config.enabled} targets=${targetLedger?.size() ?: 0}" }
     }
 
     override suspend fun onStart() {
@@ -155,9 +162,13 @@ public class QqBotGatewayPlugin :
             return MessageSendResult.failed("QQ 官方机器人账号不可用：$accountId")
         }
 
-        val plan = QqBotMessageMapper.toSendPlan(
-            batches = request.batches,
-            replyToMessageId = request.replyToMessageId,
+        // 官方按 msg_id+msg_seq 去重被动回复；主项目重试时必须续编 seq，否则重试必然被去重拒绝
+        val plan = retryReplySeqKeeper.advance(
+            request.replyToMessageId,
+            QqBotMessageMapper.toSendPlan(
+                batches = request.batches,
+                replyToMessageId = request.replyToMessageId,
+            ),
         )
         return when (val target = QqBotTarget.fromAddress(request.target)) {
             is QqBotTarget.User -> sendPlanWithReceipt(
@@ -238,12 +249,27 @@ public class QqBotGatewayPlugin :
         }
     }
 
-    override suspend fun listMessageTargets(kind: TargetKind?): List<MessageTargetCandidate> = emptyList()
+    override suspend fun listMessageTargets(kind: TargetKind?): List<MessageTargetCandidate> {
+        val ledger = targetLedger ?: return emptyList()
+        if (!running) return emptyList()
+        val candidates = ledger.listCandidates(kind)
+        return candidates.map { candidate ->
+            val accountIds = gateway.availableAccounts()
+                .filter { it.state == MessageSinkRouteState.READY }
+                .map { it.toRoute() }
+            candidate.copy(
+                sources = accountIds.map { it.toTargetSource() },
+            )
+        }
+    }
 
     override suspend fun resolveMessageTarget(address: TargetAddress): MessageTargetCandidate? {
         if (!supportsTarget(address)) return null
+        val ledgerCandidate = targetLedger?.findCandidate(address)
+        if (ledgerCandidate != null) return ledgerCandidate
+        // 账本未见过（例如订阅由其他渠道创建）：回显 externalId，至少让后台能显示
         return MessageTargetCandidate(
-            address = address,
+            address = address.copy(accountId = address.accountId?.trim()?.takeIf { it.isNotBlank() }),
             name = address.externalId,
         )
     }
@@ -287,6 +313,7 @@ public class QqBotGatewayPlugin :
         if (config.debugLogPayloads) {
             logger.info { "QQ 官方机器人入站事件原始载荷：${event.rawPayload.take(MAX_DEBUG_PAYLOAD_CHARS)}" }
         }
+        recordTargetSighting(event)
         val incoming = QqBotIncomingMessageMapper.toIncomingMessage(event)
         if (incoming == null) {
             logger.debug { "忽略 QQ 官方机器人入站事件：type=${event.type}" }
@@ -322,6 +349,24 @@ public class QqBotGatewayPlugin :
                     "QQ 官方机器人入站消息提交失败：type=${event.type} messageId=${incoming.messageId.ifBlank { "-" }}"
                 }
             }
+        }
+    }
+
+    private fun recordTargetSighting(event: QqBotIncomingEvent) {
+        val ledger = targetLedger ?: return
+        val sighting = QqBotIncomingMessageMapper.toTargetSighting(event) ?: return
+        runCatching {
+            val removed = when (event.type) {
+                QQBOT_GROUP_DEL_ROBOT, QQBOT_FRIEND_DEL -> true
+                else -> false
+            }
+            if (removed) {
+                ledger.markRemoved(sighting.kind, sighting.externalId, sighting.event)
+            } else {
+                ledger.record(sighting.kind, sighting.externalId, sighting.event, sighting.timestampEpochSeconds)
+            }
+        }.onFailure { error ->
+            logger.warn(error) { "QQ 官方机器人目标账本记录失败：type=${event.type}" }
         }
     }
 
@@ -485,12 +530,21 @@ public class QqBotGatewayPlugin :
                                     sinkTransportId = transportId,
                                 )
                             },
-                            reason = error.message ?: failureLabel,
+                            reason = error.sendOutcomeDescription(failureLabel),
+                        )
+                    } else if (error.isSendOutcomeUnknown()) {
+                        // 超时/连接中断等状态未知场景：服务器可能已收到消息，按未知上报避免重复推送
+                        MessageSendResult.uncertain(
+                            reason = error.sendOutcomeDescription(failureLabel),
+                            sinkRouteId = routeId,
+                            sinkAccountId = accountId,
+                            sinkTransportId = transportId,
                         )
                     } else {
+                        val retryable = (error as? QqBotOpenApiException)?.retryable ?: true
                         MessageSendResult.failed(
-                            reason = error.message ?: failureLabel,
-                            retryable = true,
+                            reason = error.sendOutcomeDescription(failureLabel),
+                            retryable = retryable,
                         )
                     }
                 }
@@ -506,6 +560,25 @@ public class QqBotGatewayPlugin :
                 )
             },
         )
+    }
+
+    /**
+     * 状态未知的判定：请求超时、连接在响应前中断，或 OpenAPI 明示"发送异常请稍后重试"。
+     *
+     * 这些场景下服务器可能已经受理消息，主项目不应自动重试（重复推送风险），
+     * 由人工或上层按需处理。
+     */
+    private fun Throwable.isSendOutcomeUnknown(): Boolean {
+        generateSequence(this) { it.cause }.forEach { error ->
+            if (error is java.net.http.HttpTimeoutException) return true
+            if (error is java.io.IOException && error !is java.net.ConnectException) return true
+            if (error is QqBotOpenApiException && error.outcomeUnknown) return true
+        }
+        return false
+    }
+
+    private fun Throwable.sendOutcomeDescription(failureLabel: String): String {
+        return message?.takeIf { it.isNotBlank() } ?: failureLabel
     }
 
     private suspend fun recallWithResult(

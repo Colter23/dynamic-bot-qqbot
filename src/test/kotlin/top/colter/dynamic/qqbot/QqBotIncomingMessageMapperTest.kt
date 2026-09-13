@@ -226,4 +226,114 @@ class QqBotIncomingMessageMapperTest {
 
         assertNull(incoming)
     }
+
+    @Test
+    fun `群卡片消息提取跳转链接段`() {
+        val incoming = QqBotIncomingMessageMapper.toIncomingMessage(
+            QqBotIncomingEvent(
+                type = QQBOT_GROUP_MESSAGE_CREATE,
+                botAccountId = "bot-app-id",
+                rawPayload = """
+                    {
+                      "op":0,
+                      "s":6,
+                      "t":"GROUP_MESSAGE_CREATE",
+                      "d":{
+                        "id":"group-msg-ark",
+                        "group_openid":"group-openid",
+                        "author":{"member_openid":"member-openid"},
+                        "content":"[分享] 聊聊本次更新",
+                        "message_type":3,
+                        "ark_data":{
+                          "ark_type":"miniapp",
+                          "ark_name":"哔哩哔哩",
+                          "prompt":"聊聊本次更新",
+                          "fields":{
+                            "title":"聊聊本次更新",
+                            "desc":"【明日方舟】的视频",
+                            "jump_url":"https://b23.tv/xxxxx",
+                            "preview":"https://i0.hdslb.com/bfs/preview.jpg",
+                            "source":"哔哩哔哩"
+                          }
+                        },
+                        "timestamp":"2026-06-19T04:00:00Z"
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+
+        requireNotNull(incoming)
+        val link = incoming.segments.filterIsInstance<IncomingMessageSegment.Link>().single()
+        assertEquals("https://b23.tv/xxxxx", link.url)
+        assertEquals("聊聊本次更新", link.title)
+    }
+
+    @Test
+    fun `单聊卡片消息提取跳转链接段`() {
+        val incoming = QqBotIncomingMessageMapper.toIncomingMessage(
+            QqBotIncomingEvent(
+                type = QQBOT_C2C_MESSAGE_CREATE,
+                botAccountId = "bot-app-id",
+                rawPayload = """
+                    {
+                      "op":0,
+                      "s":7,
+                      "t":"C2C_MESSAGE_CREATE",
+                      "d":{
+                        "id":"msg-ark",
+                        "author":{"user_openid":"user-openid"},
+                        "content":"[卡片消息] 小程序",
+                        "message_type":3,
+                        "ark_data":{
+                          "ark_type":"miniapp",
+                          "fields":{
+                            "jump_url":"https://www.bilibili.com/video/BV1xx411c7mD"
+                          }
+                        },
+                        "timestamp":"2026-06-19T04:00:00Z"
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+
+        requireNotNull(incoming)
+        val link = incoming.segments.filterIsInstance<IncomingMessageSegment.Link>().single()
+        assertEquals("https://www.bilibili.com/video/BV1xx411c7mD", link.url)
+    }
+
+    @Test
+    fun `卡片无跳转链接时不追加链接段`() {
+        val incoming = QqBotIncomingMessageMapper.toIncomingMessage(
+            QqBotIncomingEvent(
+                type = QQBOT_C2C_MESSAGE_CREATE,
+                botAccountId = "bot-app-id",
+                rawPayload = """
+                    {
+                      "op":0,
+                      "s":8,
+                      "t":"C2C_MESSAGE_CREATE",
+                      "d":{
+                        "id":"msg-ark-no-url",
+                        "author":{"user_openid":"user-openid"},
+                        "content":"[卡片消息] 位置",
+                        "message_type":3,
+                        "ark_data":{
+                          "ark_type":"map",
+                          "fields":{
+                            "title":"某地",
+                            "address":"某省某市"
+                          }
+                        },
+                        "timestamp":"2026-06-19T04:00:00Z"
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+
+        requireNotNull(incoming)
+        assertEquals(0, incoming.segments.filterIsInstance<IncomingMessageSegment.Link>().size)
+    }
 }

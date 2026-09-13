@@ -1,5 +1,7 @@
 package top.colter.dynamic.qqbot
 
+import java.nio.file.Files
+import java.nio.file.Path
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -96,7 +98,7 @@ class QqBotGatewayPluginSendTest {
                             MessageContent.Image(
                                 fallbackText = "",
                                 image = MediaRef(
-                                    uri = "base64://aW1hZ2UtYnl0ZXM=",
+                                    uri = "https://example.com/b.png",
                                     kind = MediaKind.IMAGE,
                                 ),
                             ),
@@ -113,7 +115,7 @@ class QqBotGatewayPluginSendTest {
         assertEquals(listOf("group-media-send-1", "group-send-1"), sent.sinkMessageIds)
         assertEquals(
             listOf(
-                "app-id:group-media:group-openid:IMAGE:aW1hZ2UtYnl0ZXM=:优妮-KokoroUni 发布了新动态\nhttps://t.bilibili.com/1215152419671900183",
+                "app-id:group-media:group-openid:IMAGE:https://example.com/b.png:优妮-KokoroUni 发布了新动态\nhttps://t.bilibili.com/1215152419671900183",
                 "app-id:group:group-openid:2026年06月18日 14:12:00",
             ),
             gateway.sendCalls,
@@ -152,7 +154,8 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
-    fun `普通发送 base64 图片走 file_data 富媒体消息`() = runBlocking {
+    fun `普通发送本地图片走分片上传富媒体消息`() = runBlocking {
+        val image = createTempImage()
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway()
         plugin.setPrivate("gateway", gateway)
@@ -166,7 +169,7 @@ class QqBotGatewayPluginSendTest {
                         listOf(
                             MessageContent.Image(
                                 fallbackText = "图片说明",
-                                image = MediaRef(uri = "base64://aW1hZ2UtYnl0ZXM=", kind = MediaKind.IMAGE),
+                                image = MediaRef(uri = image.toUri().toString(), kind = MediaKind.IMAGE),
                             ),
                         ),
                     ),
@@ -176,15 +179,13 @@ class QqBotGatewayPluginSendTest {
         )
 
         assertIs<MessageSendResult.Sent>(result)
-        assertEquals("aW1hZ2UtYnl0ZXM=", gateway.mediaCalls.single().fileDataBase64)
-        assertEquals(
-            listOf("app-id:user-media:user-openid:IMAGE:aW1hZ2UtYnl0ZXM=:图片说明"),
-            gateway.sendCalls,
-        )
+        assertEquals(image, gateway.mediaCalls.single().localFile)
+        assertEquals(QQBOT_MEDIA_MSG_TYPE, gateway.sentRequests.single().msgType)
     }
 
     @Test
-    fun `媒体投递建议禁用本地文件并保留签名链接为未知`() = runBlocking {
+    fun `媒体投递建议支持本地文件并保留签名链接为未知`() = runBlocking {
+        val image = createTempImage()
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         plugin.setPrivate("gateway", FakeGateway())
         plugin.setPrivate("running", true)
@@ -196,7 +197,14 @@ class QqBotGatewayPluginSendTest {
             MessageSinkMediaDeliveryProbeRequest(
                 routeId = "qqbot:qq:app-id",
                 method = MessageSinkMediaDeliveryMethod.LOCAL_FILE,
-                uri = "file:/tmp/a.png",
+                uri = image.toUri().toString(),
+            ),
+        )
+        val missingProbe = plugin.probeMediaDelivery(
+            MessageSinkMediaDeliveryProbeRequest(
+                routeId = "qqbot:qq:app-id",
+                method = MessageSinkMediaDeliveryMethod.LOCAL_FILE,
+                uri = "file:///qqbot/missing/image.png",
             ),
         )
         val signedUrlProbe = plugin.probeMediaDelivery(
@@ -207,8 +215,9 @@ class QqBotGatewayPluginSendTest {
             ),
         )
 
-        assertEquals(MessageSinkMediaDeliveryConfidence.UNAVAILABLE, advice.localFileConfidence)
-        assertEquals(MessageSinkMediaDeliveryProbeStatus.UNAVAILABLE, localProbe.status)
+        assertEquals(MessageSinkMediaDeliveryConfidence.CONFIRMED, advice.localFileConfidence)
+        assertEquals(MessageSinkMediaDeliveryProbeStatus.AVAILABLE, localProbe.status)
+        assertEquals(MessageSinkMediaDeliveryProbeStatus.UNAVAILABLE, missingProbe.status)
         assertEquals(MessageSinkMediaDeliveryProbeStatus.UNKNOWN, signedUrlProbe.status)
     }
 
@@ -353,6 +362,15 @@ class QqBotGatewayPluginSendTest {
         return this
     }
 
+    private fun createTempImage(): Path {
+        val dir = Files.createTempDirectory("qqbot-send-test")
+        val file = dir.resolve("image.png")
+        Files.write(file, byteArrayOf(1, 2, 3, 4))
+        file.toFile().deleteOnExit()
+        dir.toFile().deleteOnExit()
+        return file
+    }
+
     private fun deliveryRequest(target: TargetAddress, text: String): MessageSendRequest {
         return sendRequest(
             target = target,
@@ -453,7 +471,7 @@ class QqBotGatewayPluginSendTest {
         }
 
         private fun QqBotMediaResourceSource.debugValue(): String {
-            return url ?: fileDataBase64.orEmpty()
+            return url ?: localFile?.fileName?.toString().orEmpty()
         }
     }
 }

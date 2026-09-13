@@ -14,9 +14,34 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+
+/**
+ * QQ 官方机器人 OpenAPI 作用域。
+ *
+ * 官方单聊与群聊接口路径结构一致（`/v2/users/{openid}/...` 与 `/v2/groups/{group_openid}/...`），
+ * 用该类型统一表达，避免为每个接口写两份用户/群聊版本。
+ */
+internal sealed interface QqBotOpenApiScope {
+    /** 路径中的资源段，`users` 或 `groups`。 */
+    val resource: String
+
+    /** 路径中的 openid。 */
+    val id: String
+
+    data class User(val openid: String) : QqBotOpenApiScope {
+        override val resource: String get() = "users"
+        override val id: String get() = openid
+    }
+
+    data class Group(val groupOpenid: String) : QqBotOpenApiScope {
+        override val resource: String get() = "groups"
+        override val id: String get() = groupOpenid
+    }
+}
 
 internal class QqBotOpenApiClient(
     private val config: QqBotConfig,
@@ -109,60 +134,135 @@ internal class QqBotOpenApiClient(
         )
     }
 
-    fun sendUserMessage(openid: String, request: QqBotSendRequest): QqBotSendReceipt {
+    fun sendMessage(scope: QqBotOpenApiScope, request: QqBotSendRequest): QqBotSendReceipt {
         val response = transport.postJson(
-            url = "$OPEN_API_BASE_URL/v2/users/${openid.pathSegment()}/messages",
+            url = "$OPEN_API_BASE_URL/v2/${scope.resource}/${scope.id.pathSegment()}/messages",
             headers = authorizedHeaders(),
             body = encodeSendRequest(request),
         )
-        ensureSuccess("发送 QQ 官方机器人单聊消息", response)
-        return parseSendReceipt("发送 QQ 官方机器人单聊消息", response)
+        ensureSuccess("发送 QQ 官方机器人消息", response)
+        return parseSendReceipt("发送 QQ 官方机器人消息", response)
     }
 
-    fun sendGroupMessage(groupOpenid: String, request: QqBotSendRequest): QqBotSendReceipt {
+    /**
+     * 登记富媒体资源，返回可复用的 `file_info`。
+     *
+     * 传 [QqBotMediaPrepareRequest.url] 走平台下载转存；
+     * 传 [QqBotMediaPrepareRequest.uploadId] 走分片上传合并。
+     */
+    fun prepareMedia(scope: QqBotOpenApiScope, request: QqBotMediaPrepareRequest): QqBotMediaResource {
         val response = transport.postJson(
-            url = "$OPEN_API_BASE_URL/v2/groups/${groupOpenid.pathSegment()}/messages",
-            headers = authorizedHeaders(),
-            body = encodeSendRequest(request),
-        )
-        ensureSuccess("发送 QQ 官方机器人群聊消息", response)
-        return parseSendReceipt("发送 QQ 官方机器人群聊消息", response)
-    }
-
-    fun prepareUserMedia(openid: String, request: QqBotMediaPrepareRequest): QqBotMediaResource {
-        val response = transport.postJson(
-            url = "$OPEN_API_BASE_URL/v2/users/${openid.pathSegment()}/files",
+            url = "$OPEN_API_BASE_URL/v2/${scope.resource}/${scope.id.pathSegment()}/files",
             headers = authorizedHeaders(),
             body = encodeMediaPrepareRequest(request),
         )
-        ensureSuccess("登记 QQ 官方机器人单聊富媒体资源", response)
-        return parseMediaResource("登记 QQ 官方机器人单聊富媒体资源", response)
+        ensureSuccess("登记 QQ 官方机器人富媒体资源", response)
+        return parseMediaResource("登记 QQ 官方机器人富媒体资源", response)
     }
 
-    fun prepareGroupMedia(groupOpenid: String, request: QqBotMediaPrepareRequest): QqBotMediaResource {
+    fun recallMessage(scope: QqBotOpenApiScope, messageId: String) {
+        val response = transport.delete(
+            url = "$OPEN_API_BASE_URL/v2/${scope.resource}/${scope.id.pathSegment()}/messages/${messageId.pathSegment()}",
+            headers = authorizedHeaders(),
+        )
+        ensureSuccess("撤回 QQ 官方机器人消息", response)
+    }
+
+    /** 分片上传第一步：预上传，返回 `upload_id` 与各分片预签名 URL。 */
+    fun prepareUpload(scope: QqBotOpenApiScope, request: QqBotUploadPrepareRequest): QqBotUploadTicket {
+        val action = "准备 QQ 官方机器人分片上传"
         val response = transport.postJson(
-            url = "$OPEN_API_BASE_URL/v2/groups/${groupOpenid.pathSegment()}/files",
+            url = "$OPEN_API_BASE_URL/v2/${scope.resource}/${scope.id.pathSegment()}/upload_prepare",
             headers = authorizedHeaders(),
-            body = encodeMediaPrepareRequest(request),
+            body = json.encodeToString(
+                buildJsonObject {
+                    put("file_type", JsonPrimitive(request.fileType.code))
+                    put("file_size", JsonPrimitive(request.fileSizeBytes.toString()))
+                    put("file_name", JsonPrimitive(request.fileName))
+                    put("md5", JsonPrimitive(request.md5))
+                    put("sha1", JsonPrimitive(request.sha1))
+                    put("md5_10m", JsonPrimitive(request.md5Prefix))
+                },
+            ),
         )
-        ensureSuccess("登记 QQ 官方机器人群聊富媒体资源", response)
-        return parseMediaResource("登记 QQ 官方机器人群聊富媒体资源", response)
+        ensureSuccess(action, response)
+
+        val root = parseResponseObject(action, response.body)
+        val uploadId = root["upload_id"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        if (uploadId.isBlank()) {
+            throw QqBotOpenApiException(
+                action = action,
+                statusCode = response.statusCode,
+                message = "响应缺少 upload_id",
+                body = response.body,
+            )
+        }
+        val defaultBlockSize = root["block_size"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+            ?: DEFAULT_BLOCK_SIZE_BYTES
+        val parts = root["parts"]?.jsonArray?.mapNotNull { element ->
+            val item = element.jsonObject
+            val index = item["index"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
+            val presignedUrl = item["presigned_url"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+            if (presignedUrl.isBlank()) return@mapNotNull null
+            QqBotUploadPart(
+                index = index,
+                presignedUrl = presignedUrl,
+                blockSizeBytes = item["block_size"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+                    ?: defaultBlockSize,
+            )
+        }.orEmpty()
+        if (parts.isEmpty()) {
+            throw QqBotOpenApiException(
+                action = action,
+                statusCode = response.statusCode,
+                message = "响应缺少分片列表",
+                body = response.body,
+            )
+        }
+
+        val uploadConfig = root["upload_config"]?.jsonObject
+        return QqBotUploadTicket(
+            uploadId = uploadId,
+            blockSizeBytes = defaultBlockSize,
+            parts = parts.sortedBy { it.index },
+            concurrency = uploadConfig?.get("concurrency")?.jsonPrimitive?.intOrNull ?: DEFAULT_UPLOAD_CONCURRENCY,
+            retryTimeoutSeconds = uploadConfig?.get("retry_timeout")?.jsonPrimitive?.longOrNull
+                ?: DEFAULT_UPLOAD_RETRY_TIMEOUT_SECONDS,
+            retryDelaySeconds = uploadConfig?.get("retry_delay")?.jsonPrimitive?.longOrNull
+                ?: DEFAULT_UPLOAD_RETRY_DELAY_SECONDS,
+        )
     }
 
-    fun recallUserMessage(openid: String, messageId: String) {
-        val response = transport.delete(
-            url = "$OPEN_API_BASE_URL/v2/users/${openid.pathSegment()}/messages/${messageId.pathSegment()}",
-            headers = authorizedHeaders(),
-        )
-        ensureSuccess("撤回 QQ 官方机器人单聊消息", response)
+    /** 分片上传第二步：把单个分片 PUT 到预签名 URL（不携带机器人鉴权头）。 */
+    fun putUploadPart(presignedUrl: String, bytes: ByteArray) {
+        val url = presignedUrl.trim()
+        require(url.isNotBlank()) { "QQ 官方机器人分片预签名 URL 不能为空" }
+        val response = transport.putBytes(url, bytes)
+        if (response.statusCode !in 200..299) {
+            throw QqBotOpenApiException(
+                action = "上传 QQ 官方机器人分片",
+                statusCode = response.statusCode,
+                message = "HTTP 状态码 ${response.statusCode}",
+                body = response.body,
+            )
+        }
     }
 
-    fun recallGroupMessage(groupOpenid: String, messageId: String) {
-        val response = transport.delete(
-            url = "$OPEN_API_BASE_URL/v2/groups/${groupOpenid.pathSegment()}/messages/${messageId.pathSegment()}",
+    /** 分片上传第三步：通知服务端该分片已完成。 */
+    fun finishUploadPart(scope: QqBotOpenApiScope, request: QqBotUploadPartFinishRequest) {
+        val response = transport.postJson(
+            url = "$OPEN_API_BASE_URL/v2/${scope.resource}/${scope.id.pathSegment()}/upload_part_finish",
             headers = authorizedHeaders(),
+            body = json.encodeToString(
+                buildJsonObject {
+                    put("upload_id", JsonPrimitive(request.uploadId))
+                    put("part_index", JsonPrimitive(request.partIndex))
+                    put("block_size", JsonPrimitive(request.blockSizeBytes.toString()))
+                    put("md5", JsonPrimitive(request.md5))
+                },
+            ),
         )
-        ensureSuccess("撤回 QQ 官方机器人群聊消息", response)
+        ensureSuccess("确认 QQ 官方机器人分片", response)
     }
 
     private fun parseSessionStartLimit(element: JsonElement): QqBotSessionStartLimit {
@@ -185,7 +285,7 @@ internal class QqBotOpenApiClient(
         }.getOrNull()
         val errorCode = runCatching {
             val root = json.parseToJsonElement(response.body).jsonObject
-            root["code"]?.jsonPrimitive?.contentOrNull
+            (root["err_code"] ?: root["code"])?.jsonPrimitive?.contentOrNull
         }.getOrNull()
 
         throw QqBotOpenApiException(
@@ -249,9 +349,9 @@ internal class QqBotOpenApiClient(
 
     private fun encodeMediaPrepareRequest(request: QqBotMediaPrepareRequest): String {
         val url = request.url?.trim()?.takeIf { it.isNotBlank() }
-        val fileDataBase64 = request.fileDataBase64?.trim()?.takeIf { it.isNotBlank() }
-        require(url != null || fileDataBase64 != null) {
-            "QQ 官方机器人富媒体资源 URL 或 file_data 不能同时为空"
+        val uploadId = request.uploadId?.trim()?.takeIf { it.isNotBlank() }
+        require(url != null || uploadId != null) {
+            "QQ 官方机器人富媒体资源 URL 或 upload_id 不能同时为空"
         }
         return json.encodeToString(
             buildJsonObject {
@@ -259,8 +359,11 @@ internal class QqBotOpenApiClient(
                 if (url != null) {
                     put("url", JsonPrimitive(url))
                 }
-                if (fileDataBase64 != null) {
-                    put("file_data", JsonPrimitive(fileDataBase64))
+                if (uploadId != null) {
+                    put("upload_id", JsonPrimitive(uploadId))
+                }
+                request.fileName?.trim()?.takeIf { it.isNotBlank() }?.let { name ->
+                    put("file_name", JsonPrimitive(name))
                 }
                 put("srv_send_msg", JsonPrimitive(request.srvSendMsg))
             },
@@ -310,10 +413,15 @@ internal class QqBotOpenApiClient(
     }
 
     companion object {
-        private const val APP_ACCESS_TOKEN_URL: String = "https://bots.qq.com/app/getAppAccessToken"
-        private const val OPEN_API_BASE_URL: String = "https://api.sgroup.qq.com"
+        /** 官方自 2026-08-10 起统一接口域名为 `api.bot.qq.com`。 */
+        private const val APP_ACCESS_TOKEN_URL: String = "https://api.bot.qq.com/app/getAppAccessToken"
+        private const val OPEN_API_BASE_URL: String = "https://api.bot.qq.com"
         private const val ACCESS_TOKEN_REFRESH_SKEW_MILLIS: Long = 60_000L
         private const val MILLIS_PER_SECOND: Long = 1_000L
+        private const val DEFAULT_BLOCK_SIZE_BYTES: Long = 5L * 1024 * 1024
+        private const val DEFAULT_UPLOAD_CONCURRENCY: Int = 1
+        private const val DEFAULT_UPLOAD_RETRY_TIMEOUT_SECONDS: Long = 300L
+        private const val DEFAULT_UPLOAD_RETRY_DELAY_SECONDS: Long = 1L
 
         private val json = Json {
             ignoreUnknownKeys = true
@@ -340,10 +448,17 @@ internal data class QqBotSessionStartLimit(
     val maxConcurrency: Int? = null,
 )
 
+/**
+ * 富媒体资源登记请求。
+ *
+ * - [url]：URL 上传，平台下载转存。
+ * - [uploadId]：分片上传合并，需先完成 `upload_prepare` / 分片 PUT / `upload_part_finish`。
+ */
 internal data class QqBotMediaPrepareRequest(
     val fileType: QqBotMediaFileType,
     val url: String? = null,
-    val fileDataBase64: String? = null,
+    val uploadId: String? = null,
+    val fileName: String? = null,
     val srvSendMsg: Boolean = false,
 )
 
@@ -352,6 +467,37 @@ internal data class QqBotMediaResource(
     val fileUuid: String? = null,
     val ttlSeconds: Long? = null,
     val rawPayload: String = "",
+)
+
+internal data class QqBotUploadPrepareRequest(
+    val fileType: QqBotMediaFileType,
+    val fileSizeBytes: Long,
+    val fileName: String,
+    val md5: String,
+    val sha1: String,
+    val md5Prefix: String,
+)
+
+internal data class QqBotUploadTicket(
+    val uploadId: String,
+    val blockSizeBytes: Long,
+    val parts: List<QqBotUploadPart>,
+    val concurrency: Int = 1,
+    val retryTimeoutSeconds: Long = 300L,
+    val retryDelaySeconds: Long = 1L,
+)
+
+internal data class QqBotUploadPart(
+    val index: Int,
+    val presignedUrl: String,
+    val blockSizeBytes: Long,
+)
+
+internal data class QqBotUploadPartFinishRequest(
+    val uploadId: String,
+    val partIndex: Int,
+    val blockSizeBytes: Long,
+    val md5: String,
 )
 
 internal class QqBotOpenApiException(
@@ -380,6 +526,9 @@ internal interface QqBotHttpTransport {
     fun get(url: String, headers: Map<String, String>): QqBotHttpResponse
 
     fun delete(url: String, headers: Map<String, String>): QqBotHttpResponse
+
+    /** 分片上传：把分片字节 PUT 到预签名 URL。 */
+    fun putBytes(url: String, bytes: ByteArray): QqBotHttpResponse
 }
 
 internal data class QqBotHttpResponse(
@@ -410,6 +559,14 @@ internal class JavaNetQqBotHttpTransport(
     override fun delete(url: String, headers: Map<String, String>): QqBotHttpResponse {
         val request = baseRequest(url, headers)
             .DELETE()
+            .build()
+        return send(request)
+    }
+
+    override fun putBytes(url: String, bytes: ByteArray): QqBotHttpResponse {
+        val request = HttpRequest.newBuilder(URI.create(url))
+            .timeout(Duration.ofSeconds(60))
+            .PUT(HttpRequest.BodyPublishers.ofByteArray(bytes))
             .build()
         return send(request)
     }

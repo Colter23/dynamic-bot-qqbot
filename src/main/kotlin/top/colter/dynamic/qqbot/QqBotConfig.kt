@@ -160,7 +160,7 @@ public object QqBotConfigForm {
                 label = "调试图片资源",
                 type = ConfigFieldType.TEXT,
                 section = "调试",
-                description = "调试图片使用的 HTTP(S) URL 或 base64:// 数据。无公网 IP 时建议优先测试 base64://。",
+                description = "调试图片使用的 HTTP(S) URL 或本地文件路径。本地文件会走分片上传，无需公网地址。",
                 restartRequired = false,
             ),
             ConfigFieldSpec(
@@ -187,7 +187,7 @@ public object QqBotConfigForm {
         if (config.debugImageEchoText.isNotBlank()) {
             require(config.debugImageEchoSource.isNotBlank()) { "QQ 官方机器人调试图片资源不能为空" }
             require(QqBotMessageMapper.toMediaResourceSource(QqBotMediaFileType.IMAGE, config.debugImageEchoSource) != null) {
-                "QQ 官方机器人调试图片资源必须是 HTTP(S) URL 或 base64:// 数据"
+                "QQ 官方机器人调试图片资源必须是 HTTP(S) URL 或本地文件路径"
             }
         }
         config.normalizedIntents()

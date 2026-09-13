@@ -1,5 +1,7 @@
 package top.colter.dynamic.qqbot
 
+import java.nio.file.Files
+import java.nio.file.Path
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.int
@@ -18,7 +20,7 @@ class JavaNetQqBotWebSocketGatewayTest {
 
         gateway.connect { }
 
-        assertEquals("wss://api.sgroup.qq.com/websocket", connector.connectedUrl)
+        assertEquals("wss://api.bot.qq.com/websocket", connector.connectedUrl)
         assertEquals(
             QqBotRuntimeAccount(
                 accountId = "app-id",
@@ -185,7 +187,7 @@ class JavaNetQqBotWebSocketGatewayTest {
         connector.listener.onText("""{"op":0,"s":124,"t":"RESUMED","d":{}}""")
 
         assertEquals(
-            listOf("wss://api.sgroup.qq.com/websocket", "wss://api.sgroup.qq.com/websocket-reconnect"),
+            listOf("wss://api.bot.qq.com/websocket", "wss://api.bot.qq.com/websocket-reconnect"),
             connector.connectedUrls,
         )
         assertEquals(2, connector.sessions.size)
@@ -287,7 +289,7 @@ class JavaNetQqBotWebSocketGatewayTest {
                 ),
             ),
             getResponses = ArrayDeque(
-                listOf(QqBotHttpResponse(200, """{"url":"wss://api.sgroup.qq.com/websocket","shards":1}""")),
+                listOf(QqBotHttpResponse(200, """{"url":"wss://api.bot.qq.com/websocket","shards":1}""")),
             ),
         )
         val gateway = testGateway(connector = connector, transport = transport)
@@ -309,8 +311,8 @@ class JavaNetQqBotWebSocketGatewayTest {
 
         assertEquals("user-send-1", userReceipt.messageId)
         assertEquals("group-send-1", groupReceipt.messageId)
-        assertEquals("https://api.sgroup.qq.com/v2/users/user-openid/messages", transport.posts[1].url)
-        assertEquals("https://api.sgroup.qq.com/v2/groups/group-openid/messages", transport.posts[2].url)
+        assertEquals("https://api.bot.qq.com/v2/users/user-openid/messages", transport.posts[1].url)
+        assertEquals("https://api.bot.qq.com/v2/groups/group-openid/messages", transport.posts[2].url)
     }
 
     @Test
@@ -325,7 +327,7 @@ class JavaNetQqBotWebSocketGatewayTest {
                 ),
             ),
             getResponses = ArrayDeque(
-                listOf(QqBotHttpResponse(200, """{"url":"wss://api.sgroup.qq.com/websocket","shards":1}""")),
+                listOf(QqBotHttpResponse(200, """{"url":"wss://api.bot.qq.com/websocket","shards":1}""")),
             ),
         )
         val gateway = testGateway(connector = connector, transport = transport)
@@ -342,27 +344,41 @@ class JavaNetQqBotWebSocketGatewayTest {
         )
 
         assertEquals("group-media-send-1", receipt.messageId)
-        assertEquals("https://api.sgroup.qq.com/v2/groups/group-openid/files", transport.posts[1].url)
-        assertEquals("https://api.sgroup.qq.com/v2/groups/group-openid/messages", transport.posts[2].url)
+        assertEquals("https://api.bot.qq.com/v2/groups/group-openid/files", transport.posts[1].url)
+        assertEquals("https://api.bot.qq.com/v2/groups/group-openid/messages", transport.posts[2].url)
         val sendBody = Json.parseToJsonElement(transport.posts[2].body).jsonObject
         assertEquals(7, sendBody.getValue("msg_type").jsonPrimitive.int)
         assertEquals("file-info-1", sendBody.getValue("media").jsonObject.getValue("file_info").jsonPrimitive.content)
     }
 
     @Test
-    fun `就绪网关可以使用 base64 文件数据登记富媒体`() = runTest {
+    fun `就绪网关对本地文件走分片上传再发送媒体消息`() = runTest {
+        val image = createTempMediaFile()
         val connector = FakeQqBotWebSocketConnector()
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(
                 listOf(
                     QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}"""),
+                    QqBotHttpResponse(
+                        200,
+                        """
+                            {
+                              "upload_id":"upload_1",
+                              "block_size":"16",
+                              "parts":[{"index":0,"presigned_url":"https://cos.example.com/p0","block_size":"16"}],
+                              "upload_config":{"concurrency":1,"retry_timeout":300,"retry_delay":1}
+                            }
+                        """.trimIndent(),
+                    ),
+                    QqBotHttpResponse(200, ""),
                     QqBotHttpResponse(200, """{"file_info":"file-info-1","ttl":3600}"""),
                     QqBotHttpResponse(200, """{"id":"user-media-send-1"}"""),
                 ),
             ),
             getResponses = ArrayDeque(
-                listOf(QqBotHttpResponse(200, """{"url":"wss://api.sgroup.qq.com/websocket","shards":1}""")),
+                listOf(QqBotHttpResponse(200, """{"url":"wss://api.bot.qq.com/websocket","shards":1}""")),
             ),
+            putResponses = ArrayDeque(listOf(QqBotHttpResponse(200, ""))),
         )
         val gateway = testGateway(connector = connector, transport = transport)
 
@@ -375,16 +391,22 @@ class JavaNetQqBotWebSocketGatewayTest {
             openid = "user-openid",
             media = QqBotMediaResourceSource(
                 fileType = QqBotMediaFileType.IMAGE,
-                fileDataBase64 = "aW1hZ2UtYnl0ZXM=",
+                localFile = image,
+                fileName = "image.png",
             ),
             request = QqBotSendRequest(content = "图片说明", msgType = QQBOT_MEDIA_MSG_TYPE),
         )
 
         assertEquals("user-media-send-1", receipt.messageId)
-        assertEquals("https://api.sgroup.qq.com/v2/users/user-openid/files", transport.posts[1].url)
-        val prepareBody = Json.parseToJsonElement(transport.posts[1].body).jsonObject
-        assertEquals("aW1hZ2UtYnl0ZXM=", prepareBody.getValue("file_data").jsonPrimitive.content)
-        val sendBody = Json.parseToJsonElement(transport.posts[2].body).jsonObject
+        assertEquals("https://api.bot.qq.com/v2/users/user-openid/upload_prepare", transport.posts[1].url)
+        assertEquals("https://api.bot.qq.com/v2/users/user-openid/upload_part_finish", transport.posts[2].url)
+        assertEquals("https://api.bot.qq.com/v2/users/user-openid/files", transport.posts[3].url)
+        assertEquals("https://cos.example.com/p0", transport.puts.single().url)
+        assertEquals(16, transport.puts.single().bytes.size)
+        val mergeBody = Json.parseToJsonElement(transport.posts[3].body).jsonObject
+        assertEquals("upload_1", mergeBody.getValue("upload_id").jsonPrimitive.content)
+        assertEquals("image.png", mergeBody.getValue("file_name").jsonPrimitive.content)
+        val sendBody = Json.parseToJsonElement(transport.posts[4].body).jsonObject
         assertEquals("file-info-1", sendBody.getValue("media").jsonObject.getValue("file_info").jsonPrimitive.content)
     }
 
@@ -396,7 +418,7 @@ class JavaNetQqBotWebSocketGatewayTest {
                 listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
             ),
             getResponses = ArrayDeque(
-                listOf(QqBotHttpResponse(200, """{"url":"wss://api.sgroup.qq.com/websocket","shards":1}""")),
+                listOf(QqBotHttpResponse(200, """{"url":"wss://api.bot.qq.com/websocket","shards":1}""")),
             ),
             deleteResponses = ArrayDeque(
                 listOf(
@@ -422,8 +444,8 @@ class JavaNetQqBotWebSocketGatewayTest {
             messageId = "group-send-1",
         )
 
-        assertEquals("https://api.sgroup.qq.com/v2/users/user-openid/messages/user-send-1", transport.deletes[0].url)
-        assertEquals("https://api.sgroup.qq.com/v2/groups/group-openid/messages/group-send-1", transport.deletes[1].url)
+        assertEquals("https://api.bot.qq.com/v2/users/user-openid/messages/user-send-1", transport.deletes[0].url)
+        assertEquals("https://api.bot.qq.com/v2/groups/group-openid/messages/group-send-1", transport.deletes[1].url)
     }
 
     private fun testGateway(
@@ -448,13 +470,22 @@ class JavaNetQqBotWebSocketGatewayTest {
         )
     }
 
+    private fun createTempMediaFile(): Path {
+        val dir = Files.createTempDirectory("qqbot-gateway-test")
+        val file = dir.resolve("image.png")
+        Files.write(file, ByteArray(16) { it.toByte() })
+        file.toFile().deleteOnExit()
+        dir.toFile().deleteOnExit()
+        return file
+    }
+
     private fun defaultTransport(): FakeQqBotHttpTransport {
         return FakeQqBotHttpTransport(
             postResponses = ArrayDeque(
                 listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
             ),
             getResponses = ArrayDeque(
-                listOf(QqBotHttpResponse(200, """{"url":"wss://api.sgroup.qq.com/websocket","shards":1}""")),
+                listOf(QqBotHttpResponse(200, """{"url":"wss://api.bot.qq.com/websocket","shards":1}""")),
             ),
         )
     }
@@ -466,8 +497,8 @@ class JavaNetQqBotWebSocketGatewayTest {
             ),
             getResponses = ArrayDeque(
                 listOf(
-                    QqBotHttpResponse(200, """{"url":"wss://api.sgroup.qq.com/websocket","shards":1}"""),
-                    QqBotHttpResponse(200, """{"url":"wss://api.sgroup.qq.com/websocket-reconnect","shards":1}"""),
+                    QqBotHttpResponse(200, """{"url":"wss://api.bot.qq.com/websocket","shards":1}"""),
+                    QqBotHttpResponse(200, """{"url":"wss://api.bot.qq.com/websocket-reconnect","shards":1}"""),
                 ),
             ),
         )
@@ -572,14 +603,21 @@ class JavaNetQqBotWebSocketGatewayTest {
         val headers: Map<String, String>,
     )
 
+    private data class RecordedPut(
+        val url: String,
+        val bytes: ByteArray,
+    )
+
     private class FakeQqBotHttpTransport(
         private val postResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
         private val getResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
         private val deleteResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
+        private val putResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
     ) : QqBotHttpTransport {
         val posts: MutableList<RecordedPost> = mutableListOf()
         val gets: MutableList<RecordedGet> = mutableListOf()
         val deletes: MutableList<RecordedDelete> = mutableListOf()
+        val puts: MutableList<RecordedPut> = mutableListOf()
 
         override fun postJson(url: String, headers: Map<String, String>, body: String): QqBotHttpResponse {
             posts += RecordedPost(url = url, headers = headers, body = body)
@@ -594,6 +632,11 @@ class JavaNetQqBotWebSocketGatewayTest {
         override fun delete(url: String, headers: Map<String, String>): QqBotHttpResponse {
             deletes += RecordedDelete(url = url, headers = headers)
             return deleteResponses.removeFirst()
+        }
+
+        override fun putBytes(url: String, bytes: ByteArray): QqBotHttpResponse {
+            puts += RecordedPut(url = url, bytes = bytes)
+            return putResponses.removeFirst()
         }
     }
 }

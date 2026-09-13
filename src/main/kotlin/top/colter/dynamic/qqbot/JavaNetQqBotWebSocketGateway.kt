@@ -19,6 +19,7 @@ private val logger = loggerFor<JavaNetQqBotWebSocketGateway>()
 internal class JavaNetQqBotWebSocketGateway(
     private val config: QqBotConfig,
     private val openApiClient: QqBotOpenApiClient = QqBotOpenApiClient(config),
+    private val mediaUploader: QqBotMediaUploader = QqBotMediaUploader(openApiClient),
     private val connector: QqBotWebSocketConnector = JavaNetQqBotWebSocketConnector(),
     private val heartbeatScheduler: QqBotHeartbeatScheduler = ExecutorQqBotHeartbeatScheduler(),
     private val reconnectScheduler: QqBotReconnectScheduler = ExecutorQqBotReconnectScheduler(),
@@ -93,68 +94,99 @@ internal class JavaNetQqBotWebSocketGateway(
         accountId: String,
         openid: String,
         request: QqBotSendRequest,
-    ): QqBotSendReceipt = withContext(Dispatchers.IO) {
-        requireAccount(accountId)
-        openApiClient.sendUserMessage(openid, request)
-    }
+    ): QqBotSendReceipt = sendText(QqBotOpenApiScope.User(openid), accountId, request)
 
     override suspend fun sendGroupMessage(
         accountId: String,
         groupOpenid: String,
         request: QqBotSendRequest,
-    ): QqBotSendReceipt = withContext(Dispatchers.IO) {
-        requireAccount(accountId)
-        openApiClient.sendGroupMessage(groupOpenid, request)
-    }
+    ): QqBotSendReceipt = sendText(QqBotOpenApiScope.Group(groupOpenid), accountId, request)
 
     override suspend fun sendUserMediaMessage(
         accountId: String,
         openid: String,
         media: QqBotMediaResourceSource,
         request: QqBotSendRequest,
-    ): QqBotSendReceipt = withContext(Dispatchers.IO) {
-        requireAccount(accountId)
-        logger.info { "QQ 官方机器人正在登记单聊富媒体资源：account=$accountId type=${media.fileType.label} source=${media.sourceLabel()}" }
-        val resource = openApiClient.prepareUserMedia(
-            openid = openid,
-            request = media.toPrepareRequest(),
-        )
-        logger.info { "QQ 官方机器人单聊富媒体资源已登记：account=$accountId type=${media.fileType.label} ttl=${resource.ttlSeconds ?: "-"}" }
-        openApiClient.sendUserMessage(openid, request.copy(mediaFileInfo = resource.fileInfo)).also { receipt ->
-            logger.info { "QQ 官方机器人单聊富媒体消息已发送：account=$accountId messageId=${receipt.messageId}" }
-        }
-    }
+    ): QqBotSendReceipt = sendMedia(QqBotOpenApiScope.User(openid), accountId, media, request)
 
     override suspend fun sendGroupMediaMessage(
         accountId: String,
         groupOpenid: String,
         media: QqBotMediaResourceSource,
         request: QqBotSendRequest,
-    ): QqBotSendReceipt = withContext(Dispatchers.IO) {
-        requireAccount(accountId)
-        logger.info { "QQ 官方机器人正在登记群聊富媒体资源：account=$accountId type=${media.fileType.label} source=${media.sourceLabel()}" }
-        val resource = openApiClient.prepareGroupMedia(
-            groupOpenid = groupOpenid,
-            request = media.toPrepareRequest(),
-        )
-        logger.info { "QQ 官方机器人群聊富媒体资源已登记：account=$accountId type=${media.fileType.label} ttl=${resource.ttlSeconds ?: "-"}" }
-        openApiClient.sendGroupMessage(groupOpenid, request.copy(mediaFileInfo = resource.fileInfo)).also { receipt ->
-            logger.info { "QQ 官方机器人群聊富媒体消息已发送：account=$accountId messageId=${receipt.messageId}" }
-        }
-    }
+    ): QqBotSendReceipt = sendMedia(QqBotOpenApiScope.Group(groupOpenid), accountId, media, request)
 
     override suspend fun recallUserMessage(accountId: String, openid: String, messageId: String) {
-        withContext(Dispatchers.IO) {
-            requireAccount(accountId)
-            openApiClient.recallUserMessage(openid, messageId)
-        }
+        recall(QqBotOpenApiScope.User(openid), accountId, messageId)
     }
 
     override suspend fun recallGroupMessage(accountId: String, groupOpenid: String, messageId: String) {
+        recall(QqBotOpenApiScope.Group(groupOpenid), accountId, messageId)
+    }
+
+    private suspend fun sendText(
+        scope: QqBotOpenApiScope,
+        accountId: String,
+        request: QqBotSendRequest,
+    ): QqBotSendReceipt = withContext(Dispatchers.IO) {
+        requireAccount(accountId)
+        openApiClient.sendMessage(scope, request)
+    }
+
+    private suspend fun sendMedia(
+        scope: QqBotOpenApiScope,
+        accountId: String,
+        media: QqBotMediaResourceSource,
+        request: QqBotSendRequest,
+    ): QqBotSendReceipt = withContext(Dispatchers.IO) {
+        requireAccount(accountId)
+        val resource = resolveMediaResource(scope, media)
+        openApiClient.sendMessage(scope, request.copy(mediaFileInfo = resource.fileInfo)).also { receipt ->
+            logger.info { "QQ 官方机器人富媒体消息已发送：scope=${scope.resource}/${scope.id} messageId=${receipt.messageId}" }
+        }
+    }
+
+    private suspend fun recall(
+        scope: QqBotOpenApiScope,
+        accountId: String,
+        messageId: String,
+    ) {
         withContext(Dispatchers.IO) {
             requireAccount(accountId)
-            openApiClient.recallGroupMessage(groupOpenid, messageId)
+            openApiClient.recallMessage(scope, messageId)
         }
+    }
+
+    /**
+     * 把富媒体来源登记为 `file_info`：本地文件走分片上传，HTTP(S) 地址走 URL 转存。
+     */
+    private fun resolveMediaResource(
+        scope: QqBotOpenApiScope,
+        media: QqBotMediaResourceSource,
+    ): QqBotMediaResource {
+        logger.info {
+            "QQ 官方机器人正在登记富媒体资源：scope=${scope.resource}/${scope.id} type=${media.fileType.label} source=${media.sourceLabel()}"
+        }
+        val localFile = media.localFile
+        val resource = if (localFile != null) {
+            val fileName = media.fileName?.trim()?.takeIf { it.isNotBlank() }
+                ?: localFile.fileName?.toString()
+                ?: DEFAULT_MEDIA_FILE_NAME
+            mediaUploader.upload(
+                scope = scope,
+                fileType = media.fileType,
+                path = localFile,
+                fileName = fileName,
+            )
+        } else {
+            val url = media.url ?: error("QQ 官方机器人富媒体资源缺少 URL 或本地文件")
+            openApiClient.prepareMedia(
+                scope = scope,
+                request = QqBotMediaPrepareRequest(fileType = media.fileType, url = url),
+            )
+        }
+        logger.info { "QQ 官方机器人富媒体资源已登记：type=${media.fileType.label} ttl=${resource.ttlSeconds ?: "-"}" }
+        return resource
     }
 
     override fun close() {
@@ -401,6 +433,13 @@ internal class JavaNetQqBotWebSocketGateway(
         sendIdentify()
     }
 
+    /**
+     * 会话不存在时暂存待发送载荷，新连接建立后由 [openConnection] 补发。
+     *
+     * 正常重连等待期间心跳任务已取消，几乎不会有载荷进入队列；保留它只为兜底
+     * `connect()` 已返回但 `openConnection()` 尚未把会话写入字段的极小窗口，
+     * 例如 Identify 恰好在首次连接建立瞬间被触发。
+     */
     private fun sendGatewayText(payload: String) {
         val session = synchronized(lifecycleLock) {
             val current = webSocket
@@ -449,19 +488,11 @@ internal class JavaNetQqBotWebSocketGateway(
         clear()
     }
 
-    private fun QqBotMediaResourceSource.toPrepareRequest(): QqBotMediaPrepareRequest {
-        return QqBotMediaPrepareRequest(
-            fileType = fileType,
-            url = url,
-            fileDataBase64 = fileDataBase64,
-        )
-    }
-
     private fun QqBotMediaResourceSource.sourceLabel(): String {
         return when {
             url != null -> "url"
-            fileDataBase64 != null -> "base64"
-            else -> "unknown"
+            localFile != null -> "本地文件"
+            else -> "未知"
         }
     }
 
@@ -506,6 +537,7 @@ internal class JavaNetQqBotWebSocketGateway(
 }
 
 private const val MAX_DEBUG_PAYLOAD_CHARS: Int = 2_000
+private const val DEFAULT_MEDIA_FILE_NAME: String = "media"
 
 internal interface QqBotWebSocketConnector {
     fun connect(url: String, listener: QqBotWebSocketListener): QqBotWebSocketSession

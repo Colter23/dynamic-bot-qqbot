@@ -1,5 +1,7 @@
 package top.colter.dynamic.qqbot
 
+import java.nio.file.Files
+import java.nio.file.Path
 import java.security.MessageDigest
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -189,6 +191,7 @@ class QqBotGatewayPluginIncomingTest {
 
     @Test
     fun `调试图片回显命中文本时发送群聊富媒体回复`() = runBlocking {
+        val image = createTempImage()
         val plugin = QqBotGatewayPlugin()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val gateway = FakeGateway()
@@ -204,7 +207,7 @@ class QqBotGatewayPluginIncomingTest {
                 QqBotConfig(
                     autoPublishIncoming = false,
                     debugImageEchoText = "发图",
-                    debugImageEchoSource = "base64://aW1hZ2UtYnl0ZXM=",
+                    debugImageEchoSource = image.toUri().toString(),
                     debugImageEchoCaption = "图片发送测试",
                 ),
             )
@@ -216,7 +219,7 @@ class QqBotGatewayPluginIncomingTest {
             assertEquals("bot-app-id", call.accountId)
             assertEquals("group-openid", call.targetId)
             assertEquals(QqBotMediaFileType.IMAGE, call.media.fileType)
-            assertEquals("aW1hZ2UtYnl0ZXM=", call.media.fileDataBase64)
+            assertEquals(image, call.media.localFile)
             assertEquals("图片发送测试", call.request.content)
             assertEquals(QQBOT_MEDIA_MSG_TYPE, call.request.msgType)
             assertEquals("group-msg-2", call.request.replyToMessageId)
@@ -397,6 +400,15 @@ class QqBotGatewayPluginIncomingTest {
             plugin.callPrivate("stopIncomingScope")
             scope.cancel()
         }
+    }
+
+    private fun createTempImage(): Path {
+        val dir = Files.createTempDirectory("qqbot-incoming-test")
+        val file = dir.resolve("image.png")
+        Files.write(file, byteArrayOf(1, 2, 3, 4))
+        file.toFile().deleteOnExit()
+        dir.toFile().deleteOnExit()
+        return file
     }
 
     private fun QqBotGatewayPlugin.prepareIncomingTest(

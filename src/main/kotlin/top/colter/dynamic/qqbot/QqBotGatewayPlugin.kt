@@ -255,7 +255,7 @@ public class QqBotGatewayPlugin :
         if (request.accountIdFromRequest() == null) return MessageSinkMediaDeliveryAdvice()
         return MessageSinkMediaDeliveryAdvice(
             clientName = transportName,
-            localFileConfidence = MessageSinkMediaDeliveryConfidence.UNAVAILABLE,
+            localFileConfidence = MessageSinkMediaDeliveryConfidence.CONFIRMED,
         )
     }
 
@@ -267,11 +267,16 @@ public class QqBotGatewayPlugin :
             return MessageSinkMediaDeliveryProbeResult.unknown("缺少 QQ 官方机器人账号")
         }
         return when (request.method) {
-            MessageSinkMediaDeliveryMethod.LOCAL_FILE -> MessageSinkMediaDeliveryProbeResult.unavailable(
-                "QQ 官方机器人 OpenAPI 不能直接读取机器人部署机器的本地文件",
-            )
+            MessageSinkMediaDeliveryMethod.LOCAL_FILE -> {
+                val path = QqBotMessageMapper.resolveLocalFile(request.uri)
+                if (path != null) {
+                    MessageSinkMediaDeliveryProbeResult.available("本地文件可通过分片上传发送：$path")
+                } else {
+                    MessageSinkMediaDeliveryProbeResult.unavailable("本地文件不可读：${request.uri}")
+                }
+            }
             MessageSinkMediaDeliveryMethod.SIGNED_URL -> MessageSinkMediaDeliveryProbeResult.unknown(
-                "QQ 官方机器人签名链接需要腾讯服务器可公网访问，插件无法在本机可靠探测",
+                "QQ 官方机器人优先使用分片上传发送本地文件，无需签名链接",
             )
         }
     }
@@ -561,8 +566,8 @@ public class QqBotGatewayPlugin :
     private fun QqBotMediaResourceSource.debugSourceLabel(): String {
         return when {
             url != null -> "url"
-            fileDataBase64 != null -> "base64"
-            else -> "unknown"
+            localFile != null -> "本地文件"
+            else -> "未知"
         }
     }
 }

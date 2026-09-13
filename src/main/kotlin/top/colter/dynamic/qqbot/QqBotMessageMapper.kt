@@ -1,6 +1,9 @@
 package top.colter.dynamic.qqbot
 
 import java.net.URI
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
 import java.time.Instant
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -36,10 +39,19 @@ internal enum class QqBotMediaFileType(val code: Int, val label: String) {
     AUDIO(3, "语音"),
 }
 
+/**
+ * 待发送的富媒体来源。
+ *
+ * - [url]：公网可访问的 HTTP(S) 地址，走平台下载转存。
+ * - [localFile]：本地文件，走官方分片上传（无需公网地址）。
+ *
+ * 两者互斥，`url` 优先。
+ */
 internal data class QqBotMediaResourceSource(
     val fileType: QqBotMediaFileType,
     val url: String? = null,
-    val fileDataBase64: String? = null,
+    val localFile: Path? = null,
+    val fileName: String? = null,
 )
 
 internal sealed interface QqBotSendPlanItem {
@@ -57,8 +69,23 @@ internal sealed interface QqBotSendPlanItem {
 
 internal object QqBotMessageMapper {
     fun toMediaResourceSource(fileType: QqBotMediaFileType, uri: String): QqBotMediaResourceSource? {
-        return uri.toMediaResourceSourceOrNull(fileType)
+        val value = uri.trim()
+        if (value.isBlank()) return null
+        value.toHttpUrlOrNull()?.let { url ->
+            return QqBotMediaResourceSource(fileType = fileType, url = url)
+        }
+        value.toLocalFileOrNull()?.let { path ->
+            return QqBotMediaResourceSource(
+                fileType = fileType,
+                localFile = path,
+                fileName = path.fileName?.toString(),
+            )
+        }
+        return null
     }
+
+    /** 把 URI 解析为可读的本地文件；不是本地文件或文件不可读时返回 null。 */
+    fun resolveLocalFile(uri: String): Path? = uri.toLocalFileOrNull()
 
     fun toTextRequest(
         batches: List<MessageBatch>,
@@ -109,7 +136,7 @@ internal object QqBotMessageMapper {
                     mediaCandidates += media
                     if (media.source == null) {
                         textParts += media.fallbackText.ifBlank {
-                            "（暂不支持发送${media.fileType.label}，请使用 HTTP(S) URL 或 base64 数据）"
+                            "（暂不支持发送${media.fileType.label}，请使用 HTTP(S) URL 或本地文件）"
                         }
                     } else {
                         textParts += media.fallbackText
@@ -186,12 +213,6 @@ internal object QqBotMessageMapper {
             .firstOrNull()
     }
 
-    private fun String.toMediaResourceSourceOrNull(fileType: QqBotMediaFileType): QqBotMediaResourceSource? {
-        toHttpUrlOrNull()?.let { url -> return QqBotMediaResourceSource(fileType = fileType, url = url) }
-        toBase64DataOrNull()?.let { data -> return QqBotMediaResourceSource(fileType = fileType, fileDataBase64 = data) }
-        return null
-    }
-
     private fun String.toHttpUrlOrNull(): String? {
         val value = trim()
         if (value.isBlank()) return null
@@ -202,10 +223,43 @@ internal object QqBotMessageMapper {
         return value
     }
 
-    private fun String.toBase64DataOrNull(): String? {
+    /**
+     * 把输入解析为可读的本地文件。
+     *
+     * Windows 盘符路径（如 `D:\a.png`、`D:/a.png`、`C:a.png`）会被 `URI` 当成 scheme
+     * （`scheme=D`），必须先于 URI 解析识别；`file:` URI 与普通路径随后处理。
+     * 不是本地文件或不可读时返回 null。
+     */
+    private fun String.toLocalFileOrNull(): Path? {
         val value = trim()
-        if (!value.startsWith(BASE64_URI_PREFIX, ignoreCase = true)) return null
-        return value.substring(BASE64_URI_PREFIX.length).trim().takeIf { it.isNotBlank() }
+        if (value.isBlank()) return null
+        val path = try {
+            when {
+                value.isWindowsDrivePath() -> Paths.get(value)
+                else -> {
+                    val parsed = runCatching { URI(value) }.getOrNull()
+                    when {
+                        parsed == null -> Paths.get(value)
+                        parsed.scheme?.equals("file", ignoreCase = true) == true -> Paths.get(parsed)
+                        parsed.scheme != null -> return null
+                        else -> Paths.get(value)
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            return null
+        }
+        return path.takeIf { candidate ->
+            runCatching { Files.isRegularFile(candidate) }.getOrDefault(false)
+        }
+    }
+
+    /** `D:\x`、`D:/x`、`D:x` 这类盘符路径；`D` 为任意单个字母，不区分大小写。 */
+    private fun String.isWindowsDrivePath(): Boolean {
+        if (length < 2) return false
+        if (this[1] != ':') return false
+        val letter = this[0]
+        return (letter in 'a'..'z') || (letter in 'A'..'Z')
     }
 }
 
@@ -435,5 +489,4 @@ internal const val QQBOT_GROUP_MESSAGE_CREATE: String = "GROUP_MESSAGE_CREATE"
 internal const val QQBOT_TEXT_MSG_TYPE: Int = 0
 internal const val QQBOT_MEDIA_MSG_TYPE: Int = 7
 private const val QQBOT_EMPTY_MESSAGE_TEXT: String = "（空消息）"
-private const val BASE64_URI_PREFIX: String = "base64://"
 private val QQBOT_OFFICIAL_MENTION_PATTERN: Regex = Regex("""<@([^>]+)>""")

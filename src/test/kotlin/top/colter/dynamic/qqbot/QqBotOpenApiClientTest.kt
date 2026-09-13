@@ -13,7 +13,7 @@ import kotlin.test.assertTrue
 
 class QqBotOpenApiClientTest {
     @Test
-    fun `访问令牌请求符合官方应用凭据格式`() {
+    fun `访问令牌请求使用统一域名与官方应用凭据格式`() {
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(
                 listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
@@ -29,7 +29,7 @@ class QqBotOpenApiClientTest {
 
         assertEquals("token-a", token.value)
         assertEquals(7_201_000L, token.expiresAtMillis)
-        assertEquals("https://bots.qq.com/app/getAppAccessToken", transport.posts.single().url)
+        assertEquals("https://api.bot.qq.com/app/getAppAccessToken", transport.posts.single().url)
         val body = Json.parseToJsonElement(transport.posts.single().body).jsonObject
         assertEquals("app-id", body.getValue("appId").jsonPrimitive.content)
         assertEquals("secret", body.getValue("clientSecret").jsonPrimitive.content)
@@ -74,7 +74,7 @@ class QqBotOpenApiClientTest {
                         200,
                         """
                             {
-                              "url":"wss://api.sgroup.qq.com/websocket",
+                              "url":"wss://api.bot.qq.com/websocket/",
                               "shards":1,
                               "session_start_limit":{
                                 "total":1000,
@@ -95,13 +95,13 @@ class QqBotOpenApiClientTest {
 
         val endpoint = client.gatewayBotEndpoint()
 
-        assertEquals("wss://api.sgroup.qq.com/websocket", endpoint.url)
+        assertEquals("wss://api.bot.qq.com/websocket/", endpoint.url)
         assertEquals(1, endpoint.shards)
         assertEquals(1000, endpoint.sessionStartLimit?.total)
         assertEquals(999, endpoint.sessionStartLimit?.remaining)
         assertEquals(86_400_000L, endpoint.sessionStartLimit?.resetAfterMillis)
         assertEquals(1, endpoint.sessionStartLimit?.maxConcurrency)
-        assertEquals("https://api.sgroup.qq.com/gateway/bot", transport.gets.single().url)
+        assertEquals("https://api.bot.qq.com/gateway/bot", transport.gets.single().url)
         assertEquals("QQBot token-a", transport.gets.single().headers.getValue("Authorization"))
     }
 
@@ -109,7 +109,7 @@ class QqBotOpenApiClientTest {
     fun `OpenAPI 错误包含状态码业务码和消息`() {
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(
-                listOf(QqBotHttpResponse(401, """{"code":11243,"message":"token invalid"}""")),
+                listOf(QqBotHttpResponse(401, """{"err_code":11243,"message":"token invalid"}""")),
             ),
         )
         val client = QqBotOpenApiClient(
@@ -163,8 +163,8 @@ class QqBotOpenApiClientTest {
             transport = transport,
         )
 
-        val receipt = client.sendUserMessage(
-            openid = "user/open id",
+        val receipt = client.sendMessage(
+            scope = QqBotOpenApiScope.User("user/open id"),
             request = QqBotSendRequest(
                 content = "hello",
                 replyToMessageId = "source-msg",
@@ -174,7 +174,7 @@ class QqBotOpenApiClientTest {
 
         assertEquals("send-1", receipt.messageId)
         val sent = transport.posts.last()
-        assertEquals("https://api.sgroup.qq.com/v2/users/user%2Fopen%20id/messages", sent.url)
+        assertEquals("https://api.bot.qq.com/v2/users/user%2Fopen%20id/messages", sent.url)
         assertEquals("QQBot token-a", sent.headers.getValue("Authorization"))
         val body = Json.parseToJsonElement(sent.body).jsonObject
         assertEquals("hello", body.getValue("content").jsonPrimitive.content)
@@ -198,14 +198,14 @@ class QqBotOpenApiClientTest {
             transport = transport,
         )
 
-        val receipt = client.sendGroupMessage(
-            groupOpenid = "group-openid",
+        val receipt = client.sendMessage(
+            scope = QqBotOpenApiScope.Group("group-openid"),
             request = QqBotSendRequest(content = "group hello"),
         )
 
         assertEquals("group-send-1", receipt.messageId)
         val sent = transport.posts.last()
-        assertEquals("https://api.sgroup.qq.com/v2/groups/group-openid/messages", sent.url)
+        assertEquals("https://api.bot.qq.com/v2/groups/group-openid/messages", sent.url)
         val body = Json.parseToJsonElement(sent.body).jsonObject
         assertEquals("group hello", body.getValue("content").jsonPrimitive.content)
         assertEquals(false, "msg_id" in body)
@@ -227,8 +227,8 @@ class QqBotOpenApiClientTest {
             transport = transport,
         )
 
-        val receipt = client.sendGroupMessage(
-            groupOpenid = "group-openid",
+        val receipt = client.sendMessage(
+            scope = QqBotOpenApiScope.Group("group-openid"),
             request = QqBotSendRequest(
                 content = "连通性正常",
                 replyToMessageId = "group-msg-2",
@@ -245,7 +245,7 @@ class QqBotOpenApiClientTest {
     }
 
     @Test
-    fun `单聊富媒体资源登记提交官方文件负载`() {
+    fun `单聊富媒体 URL 上传提交官方文件负载`() {
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(
                 listOf(
@@ -259,8 +259,8 @@ class QqBotOpenApiClientTest {
             transport = transport,
         )
 
-        val resource = client.prepareUserMedia(
-            openid = "user/open id",
+        val resource = client.prepareMedia(
+            scope = QqBotOpenApiScope.User("user/open id"),
             request = QqBotMediaPrepareRequest(
                 fileType = QqBotMediaFileType.IMAGE,
                 url = " https://example.com/a.png ",
@@ -271,16 +271,17 @@ class QqBotOpenApiClientTest {
         assertEquals("uuid-1", resource.fileUuid)
         assertEquals(3600L, resource.ttlSeconds)
         val sent = transport.posts.last()
-        assertEquals("https://api.sgroup.qq.com/v2/users/user%2Fopen%20id/files", sent.url)
+        assertEquals("https://api.bot.qq.com/v2/users/user%2Fopen%20id/files", sent.url)
         assertEquals("QQBot token-a", sent.headers.getValue("Authorization"))
         val body = Json.parseToJsonElement(sent.body).jsonObject
         assertEquals(1, body.getValue("file_type").jsonPrimitive.int)
         assertEquals("https://example.com/a.png", body.getValue("url").jsonPrimitive.content)
         assertEquals(false, body.getValue("srv_send_msg").jsonPrimitive.boolean)
+        assertEquals(false, "file_data" in body)
     }
 
     @Test
-    fun `富媒体资源登记可以提交 base64 文件数据`() {
+    fun `富媒体分片上传合并提交 upload_id 负载`() {
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(
                 listOf(
@@ -294,18 +295,20 @@ class QqBotOpenApiClientTest {
             transport = transport,
         )
 
-        val resource = client.prepareGroupMedia(
-            groupOpenid = "group-openid",
+        val resource = client.prepareMedia(
+            scope = QqBotOpenApiScope.Group("group-openid"),
             request = QqBotMediaPrepareRequest(
-                fileType = QqBotMediaFileType.IMAGE,
-                fileDataBase64 = " aW1hZ2UtYnl0ZXM= ",
+                fileType = QqBotMediaFileType.VIDEO,
+                uploadId = " upload_1 ",
+                fileName = "demo.mp4",
             ),
         )
 
         assertEquals("file-info-1", resource.fileInfo)
         val body = Json.parseToJsonElement(transport.posts.last().body).jsonObject
-        assertEquals(1, body.getValue("file_type").jsonPrimitive.int)
-        assertEquals("aW1hZ2UtYnl0ZXM=", body.getValue("file_data").jsonPrimitive.content)
+        assertEquals(2, body.getValue("file_type").jsonPrimitive.int)
+        assertEquals("upload_1", body.getValue("upload_id").jsonPrimitive.content)
+        assertEquals("demo.mp4", body.getValue("file_name").jsonPrimitive.content)
         assertEquals(null, body["url"]?.jsonPrimitive?.contentOrNull)
         assertEquals(false, body.getValue("srv_send_msg").jsonPrimitive.boolean)
     }
@@ -323,13 +326,119 @@ class QqBotOpenApiClientTest {
         )
 
         val error = assertFailsWith<IllegalArgumentException> {
-            client.prepareUserMedia(
-                openid = "user-openid",
+            client.prepareMedia(
+                scope = QqBotOpenApiScope.User("user-openid"),
                 request = QqBotMediaPrepareRequest(fileType = QqBotMediaFileType.IMAGE),
             )
         }
 
-        assertEquals("QQ 官方机器人富媒体资源 URL 或 file_data 不能同时为空", error.message)
+        assertEquals("QQ 官方机器人富媒体资源 URL 或 upload_id 不能同时为空", error.message)
+    }
+
+    @Test
+    fun `分片上传预上传解析 upload_id 与分片列表`() {
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}"""),
+                    QqBotHttpResponse(
+                        200,
+                        """
+                            {
+                              "upload_id":"upload_1",
+                              "block_size":"10485760",
+                              "parts":[
+                                {"index":0,"presigned_url":"https://cos.example.com/p1","block_size":"10485760"},
+                                {"index":1,"presigned_url":"https://cos.example.com/p2","block_size":"10485760"}
+                              ],
+                              "upload_config":{"concurrency":2,"retry_timeout":300,"retry_delay":1}
+                            }
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        val ticket = client.prepareUpload(
+            scope = QqBotOpenApiScope.User("user-openid"),
+            request = QqBotUploadPrepareRequest(
+                fileType = QqBotMediaFileType.VIDEO,
+                fileSizeBytes = 15_000_000L,
+                fileName = "demo.mp4",
+                md5 = "md5-value",
+                sha1 = "sha1-value",
+                md5Prefix = "md5-prefix",
+            ),
+        )
+
+        assertEquals("upload_1", ticket.uploadId)
+        assertEquals(10_485_760L, ticket.blockSizeBytes)
+        assertEquals(2, ticket.parts.size)
+        assertEquals(2, ticket.concurrency)
+        val sent = transport.posts.last()
+        assertEquals("https://api.bot.qq.com/v2/users/user-openid/upload_prepare", sent.url)
+        val body = Json.parseToJsonElement(sent.body).jsonObject
+        assertEquals(2, body.getValue("file_type").jsonPrimitive.int)
+        assertEquals("15000000", body.getValue("file_size").jsonPrimitive.content)
+        assertEquals("demo.mp4", body.getValue("file_name").jsonPrimitive.content)
+        assertEquals("md5-value", body.getValue("md5").jsonPrimitive.content)
+        assertEquals("sha1-value", body.getValue("sha1").jsonPrimitive.content)
+        assertEquals("md5-prefix", body.getValue("md5_10m").jsonPrimitive.content)
+    }
+
+    @Test
+    fun `分片上传分片 PUT 到预签名 URL 且不携带鉴权头`() {
+        val transport = FakeQqBotHttpTransport(
+            putResponses = ArrayDeque(listOf(QqBotHttpResponse(200, ""))),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        client.putUploadPart("https://cos.example.com/p1", byteArrayOf(1, 2, 3))
+
+        val put = transport.puts.single()
+        assertEquals("https://cos.example.com/p1", put.url)
+        assertEquals(listOf<Byte>(1, 2, 3), put.bytes.toList())
+    }
+
+    @Test
+    fun `分片上传分片完成提交 upload_id 与分片信息`() {
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}"""),
+                    QqBotHttpResponse(200, ""),
+                ),
+            ),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        client.finishUploadPart(
+            scope = QqBotOpenApiScope.Group("group-openid"),
+            request = QqBotUploadPartFinishRequest(
+                uploadId = "upload_1",
+                partIndex = 0,
+                blockSizeBytes = 1_048_576L,
+                md5 = "part-md5",
+            ),
+        )
+
+        val sent = transport.posts.last()
+        assertEquals("https://api.bot.qq.com/v2/groups/group-openid/upload_part_finish", sent.url)
+        val body = Json.parseToJsonElement(sent.body).jsonObject
+        assertEquals("upload_1", body.getValue("upload_id").jsonPrimitive.content)
+        assertEquals(0, body.getValue("part_index").jsonPrimitive.int)
+        assertEquals("1048576", body.getValue("block_size").jsonPrimitive.content)
+        assertEquals("part-md5", body.getValue("md5").jsonPrimitive.content)
     }
 
     @Test
@@ -347,8 +456,8 @@ class QqBotOpenApiClientTest {
             transport = transport,
         )
 
-        val receipt = client.sendGroupMessage(
-            groupOpenid = "group-openid",
+        val receipt = client.sendMessage(
+            scope = QqBotOpenApiScope.Group("group-openid"),
             request = QqBotSendRequest(
                 content = "",
                 msgType = QQBOT_MEDIA_MSG_TYPE,
@@ -382,10 +491,10 @@ class QqBotOpenApiClientTest {
             transport = transport,
         )
 
-        client.recallUserMessage(openid = "user/open id", messageId = "msg/1")
+        client.recallMessage(scope = QqBotOpenApiScope.User("user/open id"), messageId = "msg/1")
 
         val deleted = transport.deletes.single()
-        assertEquals("https://api.sgroup.qq.com/v2/users/user%2Fopen%20id/messages/msg%2F1", deleted.url)
+        assertEquals("https://api.bot.qq.com/v2/users/user%2Fopen%20id/messages/msg%2F1", deleted.url)
         assertEquals("QQBot token-a", deleted.headers.getValue("Authorization"))
     }
 
@@ -404,51 +513,63 @@ class QqBotOpenApiClientTest {
             transport = transport,
         )
 
-        client.recallGroupMessage(groupOpenid = "group-openid", messageId = "group-msg-1")
+        client.recallMessage(scope = QqBotOpenApiScope.Group("group-openid"), messageId = "group-msg-1")
 
         val deleted = transport.deletes.single()
-        assertEquals("https://api.sgroup.qq.com/v2/groups/group-openid/messages/group-msg-1", deleted.url)
+        assertEquals("https://api.bot.qq.com/v2/groups/group-openid/messages/group-msg-1", deleted.url)
         assertEquals("QQBot token-a", deleted.headers.getValue("Authorization"))
     }
+}
 
-    private data class RecordedPost(
-        val url: String,
-        val headers: Map<String, String>,
-        val body: String,
-    )
+internal data class RecordedPost(
+    val url: String,
+    val headers: Map<String, String>,
+    val body: String,
+)
 
-    private data class RecordedGet(
-        val url: String,
-        val headers: Map<String, String>,
-    )
+internal data class RecordedGet(
+    val url: String,
+    val headers: Map<String, String>,
+)
 
-    private data class RecordedDelete(
-        val url: String,
-        val headers: Map<String, String>,
-    )
+internal data class RecordedDelete(
+    val url: String,
+    val headers: Map<String, String>,
+)
 
-    private class FakeQqBotHttpTransport(
-        private val postResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
-        private val getResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
-        private val deleteResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
-    ) : QqBotHttpTransport {
-        val posts: MutableList<RecordedPost> = mutableListOf()
-        val gets: MutableList<RecordedGet> = mutableListOf()
-        val deletes: MutableList<RecordedDelete> = mutableListOf()
+internal data class RecordedPut(
+    val url: String,
+    val bytes: ByteArray,
+)
 
-        override fun postJson(url: String, headers: Map<String, String>, body: String): QqBotHttpResponse {
-            posts += RecordedPost(url = url, headers = headers, body = body)
-            return postResponses.removeFirst()
-        }
+internal class FakeQqBotHttpTransport(
+    private val postResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
+    private val getResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
+    private val deleteResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
+    private val putResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
+) : QqBotHttpTransport {
+    val posts: MutableList<RecordedPost> = mutableListOf()
+    val gets: MutableList<RecordedGet> = mutableListOf()
+    val deletes: MutableList<RecordedDelete> = mutableListOf()
+    val puts: MutableList<RecordedPut> = mutableListOf()
 
-        override fun get(url: String, headers: Map<String, String>): QqBotHttpResponse {
-            gets += RecordedGet(url = url, headers = headers)
-            return getResponses.removeFirst()
-        }
+    override fun postJson(url: String, headers: Map<String, String>, body: String): QqBotHttpResponse {
+        posts += RecordedPost(url = url, headers = headers, body = body)
+        return postResponses.removeFirst()
+    }
 
-        override fun delete(url: String, headers: Map<String, String>): QqBotHttpResponse {
-            deletes += RecordedDelete(url = url, headers = headers)
-            return deleteResponses.removeFirst()
-        }
+    override fun get(url: String, headers: Map<String, String>): QqBotHttpResponse {
+        gets += RecordedGet(url = url, headers = headers)
+        return getResponses.removeFirst()
+    }
+
+    override fun delete(url: String, headers: Map<String, String>): QqBotHttpResponse {
+        deletes += RecordedDelete(url = url, headers = headers)
+        return deleteResponses.removeFirst()
+    }
+
+    override fun putBytes(url: String, bytes: ByteArray): QqBotHttpResponse {
+        puts += RecordedPut(url = url, bytes = bytes)
+        return putResponses.removeFirst()
     }
 }

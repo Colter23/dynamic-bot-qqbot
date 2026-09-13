@@ -253,14 +253,11 @@ public class QqBotGatewayPlugin :
         val ledger = targetLedger ?: return emptyList()
         if (!running) return emptyList()
         val candidates = ledger.listCandidates(kind)
-        return candidates.map { candidate ->
-            val accountIds = gateway.availableAccounts()
-                .filter { it.state == MessageSinkRouteState.READY }
-                .map { it.toRoute() }
-            candidate.copy(
-                sources = accountIds.map { it.toTargetSource() },
-            )
-        }
+        if (candidates.isEmpty()) return candidates
+        val sources = gateway.availableAccounts()
+            .filter { it.state == MessageSinkRouteState.READY }
+            .map { it.toRoute().toTargetSource() }
+        return candidates.map { candidate -> candidate.copy(sources = sources) }
     }
 
     override suspend fun resolveMessageTarget(address: TargetAddress): MessageTargetCandidate? {
@@ -371,12 +368,54 @@ public class QqBotGatewayPlugin :
     }
 
     private fun maybeSendDebugResponses(incoming: IncomingMessage, scope: CoroutineScope) {
-        var nextMsgSeq = 1
-        if (matchesDebugTextEcho(incoming)) {
-            sendDebugTextEcho(incoming, scope, msgSeq = nextMsgSeq++)
+        // 调试回显与命令回复共用同一 msg_id 被动回复窗口，seq 也须经 keeper 续编，
+        // 否则与主项目命令回复同时触发时会被官方 msg_id+msg_seq 去重拒绝，
+        // 导致"回显失败"被误判为连通性问题
+        val textEcho = matchesDebugTextEcho(incoming)
+        val imageEcho = matchesDebugImageEcho(incoming)
+        if (!textEcho && !imageEcho) return
+
+        val echoRequests = buildList {
+            if (textEcho) {
+                add(
+                    QqBotMessageMapper.toTextRequest(
+                        batches = listOf(
+                            MessageBatch(
+                                listOf(
+                                    MessageContent.Text(
+                                        config.debugEchoReply.trim().ifBlank { "QQ 官方机器人 WebSocket 连通性正常" },
+                                    ),
+                                ),
+                            ),
+                        ),
+                        replyToMessageId = incoming.messageId,
+                    ),
+                )
+            }
+            if (imageEcho) {
+                add(
+                    QqBotSendRequest(
+                        content = config.debugImageEchoCaption.trim().ifBlank { " " },
+                        msgType = QQBOT_MEDIA_MSG_TYPE,
+                        replyToMessageId = incoming.messageId,
+                    ),
+                )
+            }
         }
-        if (matchesDebugImageEcho(incoming)) {
-            sendDebugImageEcho(incoming, scope, msgSeq = nextMsgSeq)
+
+        val planned = retryReplySeqKeeper.advance(
+            incoming.messageId,
+            echoRequests.map { QqBotSendPlanItem.Text(it) },
+        )
+        // advance 保持了输入顺序：文本回显（如有）在前，图片回显（如有）在后
+        var textRemaining = textEcho
+        planned.forEach { item ->
+            if (textRemaining) {
+                textRemaining = false
+                sendDebugTextEcho(incoming, scope, item.request)
+            } else {
+                sendDebugImageEcho(incoming, scope, item.request)
+            }
         }
     }
 
@@ -409,19 +448,16 @@ public class QqBotGatewayPlugin :
         return incoming.text.matchesDebugEchoTrigger(trigger)
     }
 
-    private fun sendDebugTextEcho(incoming: IncomingMessage, scope: CoroutineScope, msgSeq: Int) {
-        val reply = config.debugEchoReply.trim().ifBlank { "QQ 官方机器人 WebSocket 连通性正常" }
+    private fun sendDebugTextEcho(incoming: IncomingMessage, scope: CoroutineScope, request: QqBotSendRequest) {
         val accountId = incoming.botAccountId?.trim()?.takeIf { it.isNotBlank() }
             ?: config.appId.trim().takeIf { it.isNotBlank() }
             ?: return
-        logger.info { "QQ 官方机器人调试文本回显已触发：messageId=${incoming.messageId.ifBlank { "-" }} msgSeq=$msgSeq" }
+        logger.info {
+            "QQ 官方机器人调试文本回显已触发：messageId=${incoming.messageId.ifBlank { "-" }} msgSeq=${request.msgSeq}"
+        }
         scope.launch {
             if (!running) return@launch
             runCatching {
-                val request = QqBotMessageMapper.toTextRequest(
-                    batches = listOf(MessageBatch(listOf(MessageContent.Text(reply)))),
-                    replyToMessageId = incoming.messageId,
-                ).copy(msgSeq = msgSeq)
                 when (val target = QqBotTarget.fromAddress(incoming.target)) {
                     is QqBotTarget.User -> gateway.sendUserMessage(accountId, target.openid, request)
                     is QqBotTarget.Group -> gateway.sendGroupMessage(accountId, target.groupOpenid, request)
@@ -436,7 +472,7 @@ public class QqBotGatewayPlugin :
         }
     }
 
-    private fun sendDebugImageEcho(incoming: IncomingMessage, scope: CoroutineScope, msgSeq: Int) {
+    private fun sendDebugImageEcho(incoming: IncomingMessage, scope: CoroutineScope, request: QqBotSendRequest) {
         val media = QqBotMessageMapper.toMediaResourceSource(
             fileType = QqBotMediaFileType.IMAGE,
             uri = config.debugImageEchoSource,
@@ -447,19 +483,12 @@ public class QqBotGatewayPlugin :
         val accountId = incoming.botAccountId?.trim()?.takeIf { it.isNotBlank() }
             ?: config.appId.trim().takeIf { it.isNotBlank() }
             ?: return
-        val caption = config.debugImageEchoCaption.trim().ifBlank { " " }
         logger.info {
-            "QQ 官方机器人调试图片回显已触发：messageId=${incoming.messageId.ifBlank { "-" }} msgSeq=$msgSeq source=${media.debugSourceLabel()}"
+            "QQ 官方机器人调试图片回显已触发：messageId=${incoming.messageId.ifBlank { "-" }} msgSeq=${request.msgSeq} source=${media.debugSourceLabel()}"
         }
         scope.launch {
             if (!running) return@launch
             runCatching {
-                val request = QqBotSendRequest(
-                    content = caption,
-                    msgType = QQBOT_MEDIA_MSG_TYPE,
-                    replyToMessageId = incoming.messageId,
-                    msgSeq = msgSeq,
-                )
                 when (val target = QqBotTarget.fromAddress(incoming.target)) {
                     is QqBotTarget.User -> gateway.sendUserMediaMessage(accountId, target.openid, media, request)
                     is QqBotTarget.Group -> gateway.sendGroupMediaMessage(accountId, target.groupOpenid, media, request)

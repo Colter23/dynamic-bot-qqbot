@@ -18,7 +18,9 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import top.colter.dynamic.core.plugin.IncomingMessagePublishRequest
 import top.colter.dynamic.core.plugin.IncomingMessagePublisher
+import top.colter.dynamic.core.plugin.MessageSendResult
 import top.colter.dynamic.core.plugin.MessageSinkRouteState
+import top.colter.dynamic.core.data.TargetKind
 
 class QqBotGatewayPluginIncomingTest {
     @Test
@@ -271,6 +273,64 @@ class QqBotGatewayPluginIncomingTest {
     }
 
     @Test
+    fun `调试回显与命令回复共用消息 ID 时不占用相同 msgSeq`() = runBlocking {
+        val plugin = QqBotGatewayPlugin()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val gateway = FakeGateway()
+        plugin.prepareIncomingTest(
+            scope = scope,
+            publishIncoming = {},
+        )
+
+        try {
+            plugin.setPrivate("running", true)
+            plugin.setPrivate(
+                "config",
+                QqBotConfig(
+                    autoPublishIncoming = false,
+                    debugEchoText = "测试",
+                    debugEchoReply = "连通性正常",
+                ),
+            )
+            plugin.setPrivate("gateway", gateway)
+
+            // 消息到达：调试回显先占用 seq
+            plugin.invokeIncoming(groupMessageEvent(content = "<@bot-member-openid> 测试"))
+            val echoCall = withTimeout(500) { gateway.groupSend.await() }
+            assertEquals(1, echoCall.request.msgSeq)
+
+            // 主项目命令回复（replyToMessageId 相同）：seq 应续编为 2，而不是再撞 1
+            val replyResult = plugin.sendMessage(
+                request = top.colter.dynamic.core.plugin.MessageSendRequest(
+                    message = top.colter.dynamic.core.data.Message(
+                        id = "message-reply",
+                        time = 1,
+                        targets = listOf(top.colter.dynamic.core.data.TargetAddress.of("qq", TargetKind.GROUP, "group-openid")),
+                        batches = listOf(
+                            top.colter.dynamic.core.data.MessageBatch(
+                                listOf(top.colter.dynamic.core.data.MessageContent.Text("命令结果")),
+                            ),
+                        ),
+                        replyToMessageId = "group-msg-2",
+                    ),
+                    target = top.colter.dynamic.core.data.TargetAddress.of("qq", TargetKind.GROUP, "group-openid"),
+                ),
+                routeId = "qqbot:qq:bot-app-id",
+            )
+            assertEquals(1, replyResult.receipts.size)
+            assertEquals(2, gateway.groupSentRequests.last().msgSeq)
+            assertEquals(
+                listOf(1, 2),
+                gateway.groupSentRequests.map { it.msgSeq },
+                "调试回显与命令回复的 msgSeq 必须互不重复",
+            )
+        } finally {
+            plugin.callPrivate("stopIncomingScope")
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun `群 at 事件应发布标准入站消息`() = runBlocking {
         val plugin = QqBotGatewayPlugin()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -440,6 +500,8 @@ class QqBotGatewayPluginIncomingTest {
         val groupSend: CompletableDeferred<SendCall> = CompletableDeferred()
         val userMediaSend: CompletableDeferred<MediaSendCall> = CompletableDeferred()
         val groupMediaSend: CompletableDeferred<MediaSendCall> = CompletableDeferred()
+        val groupSentRequests: MutableList<QqBotSendRequest> =
+            java.util.Collections.synchronizedList(mutableListOf())
 
         override suspend fun connect(onIncomingEvent: (QqBotIncomingEvent) -> Unit) {
         }
@@ -462,6 +524,7 @@ class QqBotGatewayPluginIncomingTest {
             groupOpenid: String,
             request: QqBotSendRequest,
         ): QqBotSendReceipt {
+            groupSentRequests += request
             groupSend.complete(SendCall(accountId, groupOpenid, request))
             return QqBotSendReceipt("group-send-1")
         }

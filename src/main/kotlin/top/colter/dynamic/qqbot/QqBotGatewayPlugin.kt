@@ -12,8 +12,6 @@ import top.colter.dynamic.core.config.ConfigurablePlugin
 import top.colter.dynamic.core.config.loadOrCreate
 import top.colter.dynamic.core.data.IncomingMessage
 import top.colter.dynamic.core.data.IncomingMessageSegment
-import top.colter.dynamic.core.data.MessageBatch
-import top.colter.dynamic.core.data.MessageContent
 import top.colter.dynamic.core.data.PlatformId
 import top.colter.dynamic.core.data.TargetAddress
 import top.colter.dynamic.core.data.TargetKind
@@ -306,9 +304,8 @@ public class QqBotGatewayPlugin :
 
     internal fun onIncomingEvent(event: QqBotIncomingEvent) {
         if (!running) return
-        logger.info { "QQ 官方机器人收到入站事件：type=${event.type} account=${event.botAccountId.orEmpty().ifBlank { "-" }}" }
-        if (config.debugLogPayloads) {
-            logger.info { "QQ 官方机器人入站事件原始载荷：${event.rawPayload.take(MAX_DEBUG_PAYLOAD_CHARS)}" }
+        logger.debug {
+            "QQ 官方机器人收到入站事件：type=${event.type} account=${event.botAccountId.orEmpty().ifBlank { "-" }}"
         }
         recordTargetSighting(event)
         val incoming = runCatching { QqBotIncomingMessageMapper.toIncomingMessage(event) }
@@ -320,12 +317,11 @@ public class QqBotGatewayPlugin :
             logger.debug { "忽略 QQ 官方机器人入站事件：type=${event.type}" }
             return
         }
-        logger.info {
-            "QQ 官方机器人入站消息已解析：messageId=${incoming.messageId.ifBlank { "-" }} target=${incoming.target.kind}:${incoming.target.externalId} sender=${incoming.senderId} ${incoming.mediaDebugSummary()} text=${incoming.text.take(MAX_DEBUG_TEXT_CHARS)}"
+        logger.debug {
+            "QQ 官方机器人入站消息已解析：messageId=${incoming.messageId.ifBlank { "-" }} target=${incoming.target.kind}:${incoming.target.externalId} sender=${incoming.senderId} ${incoming.mediaSummary()} text=${incoming.text.take(MAX_LOG_TEXT_CHARS)}"
         }
 
         val scope = incomingScope ?: return
-        maybeSendDebugResponses(incoming, scope)
         if (!config.autoPublishIncoming) return
 
         scope.launch {
@@ -341,7 +337,7 @@ public class QqBotGatewayPlugin :
                         dedupeKey = event.dedupeKey(incoming),
                     ),
                 )
-                logger.info {
+                logger.debug {
                     "QQ 官方机器人入站消息已提交主项目：messageId=${incoming.messageId.ifBlank { "-" }} target=${incoming.target.stableValue()}"
                 }
             }.onFailure { error ->
@@ -371,58 +367,6 @@ public class QqBotGatewayPlugin :
         }
     }
 
-    private fun maybeSendDebugResponses(incoming: IncomingMessage, scope: CoroutineScope) {
-        // 调试回显与命令回复共用同一 msg_id 被动回复窗口，seq 也须经 keeper 续编，
-        // 否则与主项目命令回复同时触发时会被官方 msg_id+msg_seq 去重拒绝，
-        // 导致"回显失败"被误判为连通性问题
-        val textEcho = matchesDebugTextEcho(incoming)
-        val imageEcho = matchesDebugImageEcho(incoming)
-        if (!textEcho && !imageEcho) return
-
-        val echoRequests = buildList {
-            if (textEcho) {
-                add(
-                    QqBotMessageMapper.toTextRequest(
-                        batches = listOf(
-                            MessageBatch(
-                                listOf(
-                                    MessageContent.Text(
-                                        config.debugEchoReply.trim().ifBlank { "QQ 官方机器人 WebSocket 连通性正常" },
-                                    ),
-                                ),
-                            ),
-                        ),
-                        replyToMessageId = incoming.messageId,
-                    ),
-                )
-            }
-            if (imageEcho) {
-                add(
-                    QqBotSendRequest(
-                        content = config.debugImageEchoCaption.trim().ifBlank { " " },
-                        msgType = QQBOT_MEDIA_MSG_TYPE,
-                        replyToMessageId = incoming.messageId,
-                    ),
-                )
-            }
-        }
-
-        val planned = retryReplySeqKeeper.advance(
-            incoming.messageId,
-            echoRequests.map { QqBotSendPlanItem.Text(it) },
-        )
-        // advance 保持了输入顺序：文本回显（如有）在前，图片回显（如有）在后
-        var textRemaining = textEcho
-        planned.forEach { item ->
-            if (textRemaining) {
-                textRemaining = false
-                sendDebugTextEcho(incoming, scope, item.request)
-            } else {
-                sendDebugImageEcho(incoming, scope, item.request)
-            }
-        }
-    }
-
     private fun QqBotIncomingEvent.sourceEventId(messageId: String): String {
         return listOf(type, messageId).joinToString(":")
     }
@@ -440,71 +384,6 @@ public class QqBotGatewayPlugin :
 
     private fun QqBotIncomingEvent.traceId(incoming: IncomingMessage): String {
         return "${QQBOT_PLUGIN_ID}:${dedupeKey(incoming).sha256Hex()}"
-    }
-
-    private fun matchesDebugTextEcho(incoming: IncomingMessage): Boolean {
-        val trigger = config.debugEchoText.trim().takeIf { it.isNotBlank() } ?: return false
-        return incoming.text.matchesDebugEchoTrigger(trigger)
-    }
-
-    private fun matchesDebugImageEcho(incoming: IncomingMessage): Boolean {
-        val trigger = config.debugImageEchoText.trim().takeIf { it.isNotBlank() } ?: return false
-        return incoming.text.matchesDebugEchoTrigger(trigger)
-    }
-
-    private fun sendDebugTextEcho(incoming: IncomingMessage, scope: CoroutineScope, request: QqBotSendRequest) {
-        val accountId = incoming.botAccountId?.trim()?.takeIf { it.isNotBlank() }
-            ?: config.appId.trim().takeIf { it.isNotBlank() }
-            ?: return
-        logger.info {
-            "QQ 官方机器人调试文本回显已触发：messageId=${incoming.messageId.ifBlank { "-" }} msgSeq=${request.msgSeq}"
-        }
-        scope.launch {
-            if (!running) return@launch
-            runCatching {
-                when (val target = QqBotTarget.fromAddress(incoming.target)) {
-                    is QqBotTarget.User -> gateway.sendUserMessage(accountId, target.openid, request)
-                    is QqBotTarget.Group -> gateway.sendGroupMessage(accountId, target.groupOpenid, request)
-                    is QqBotTarget.Unsupported -> error(target.reason)
-                }
-            }.onSuccess { receipt ->
-                logger.info { "QQ 官方机器人调试回显发送成功：messageId=${receipt.messageId}" }
-            }.onFailure { error ->
-                if (error is CancellationException) throw error
-                logger.warn(error) { "QQ 官方机器人调试回显发送失败" }
-            }
-        }
-    }
-
-    private fun sendDebugImageEcho(incoming: IncomingMessage, scope: CoroutineScope, request: QqBotSendRequest) {
-        val media = QqBotMessageMapper.toMediaResourceSource(
-            fileType = QqBotMediaFileType.IMAGE,
-            uri = config.debugImageEchoSource,
-        ) ?: run {
-            logger.warn { "QQ 官方机器人调试图片资源无效，无法发送图片回显" }
-            return
-        }
-        val accountId = incoming.botAccountId?.trim()?.takeIf { it.isNotBlank() }
-            ?: config.appId.trim().takeIf { it.isNotBlank() }
-            ?: return
-        logger.info {
-            "QQ 官方机器人调试图片回显已触发：messageId=${incoming.messageId.ifBlank { "-" }} msgSeq=${request.msgSeq} source=${media.debugSourceLabel()}"
-        }
-        scope.launch {
-            if (!running) return@launch
-            runCatching {
-                when (val target = QqBotTarget.fromAddress(incoming.target)) {
-                    is QqBotTarget.User -> gateway.sendUserMediaMessage(accountId, target.openid, media, request)
-                    is QqBotTarget.Group -> gateway.sendGroupMediaMessage(accountId, target.groupOpenid, media, request)
-                    is QqBotTarget.Unsupported -> error(target.reason)
-                }
-            }.onSuccess { receipt ->
-                logger.info { "QQ 官方机器人调试图片发送成功：messageId=${receipt.messageId}" }
-            }.onFailure { error ->
-                if (error is CancellationException) throw error
-                logger.warn(error) { "QQ 官方机器人调试图片发送失败" }
-            }
-        }
     }
 
     private fun startIncomingScope() {
@@ -642,16 +521,7 @@ public class QqBotGatewayPlugin :
             ?: accountId?.trim()?.takeIf { it.isNotBlank() }
     }
 
-    private fun String.matchesDebugEchoTrigger(trigger: String): Boolean {
-        val normalized = trim()
-        val withoutLeadingMention = normalized
-            .replace(QQBOT_LEADING_OFFICIAL_MENTION_PATTERN, "")
-            .replace(QQBOT_LEADING_PLAIN_MENTION_PATTERN, "")
-            .trim()
-        return normalized == trigger || withoutLeadingMention == trigger
-    }
-
-    private fun IncomingMessage.mediaDebugSummary(): String {
+    private fun IncomingMessage.mediaSummary(): String {
         val images = segments.count { it is IncomingMessageSegment.Image }
         val videos = segments.count { it is IncomingMessageSegment.Video }
         val audios = segments.count { it is IncomingMessageSegment.Audio }
@@ -668,14 +538,6 @@ public class QqBotGatewayPlugin :
             "媒体=${parts.joinToString(",")}"
         }
     }
-
-    private fun QqBotMediaResourceSource.debugSourceLabel(): String {
-        return when {
-            url != null -> "url"
-            localFile != null -> "本地文件"
-            else -> "未知"
-        }
-    }
 }
 
 private fun String.sha256Hex(): String {
@@ -687,7 +549,5 @@ internal fun createQqBotGateway(config: QqBotConfig): QqBotGateway {
     return JavaNetQqBotWebSocketGateway(config)
 }
 
-private const val MAX_DEBUG_PAYLOAD_CHARS: Int = 2_000
-private const val MAX_DEBUG_TEXT_CHARS: Int = 200
-private val QQBOT_LEADING_OFFICIAL_MENTION_PATTERN: Regex = Regex("""^(?:\s*<@[^>]+>\s*)+""")
-private val QQBOT_LEADING_PLAIN_MENTION_PATTERN: Regex = Regex("""^(?:\s*@\S+\s*)+""")
+/** 调试级日志中入站文本的截断长度，避免日志被超长消息刷屏。 */
+private const val MAX_LOG_TEXT_CHARS: Int = 200

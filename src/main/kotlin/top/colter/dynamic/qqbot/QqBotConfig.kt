@@ -9,16 +9,9 @@ public data class QqBotConfig(
     val enabled: Boolean = false,
     val appId: String = "",
     val appSecret: String = "",
-    val sandbox: Boolean = false,
     val intents: List<String> = listOf(QqBotIntent.GROUP_AND_C2C_EVENT.name),
     val reconnect: Boolean = true,
     val autoPublishIncoming: Boolean = true,
-    val debugLogPayloads: Boolean = false,
-    val debugEchoText: String = "",
-    val debugEchoReply: String = "QQ 官方机器人 WebSocket 连通性正常",
-    val debugImageEchoText: String = "",
-    val debugImageEchoSource: String = "",
-    val debugImageEchoCaption: String = "QQ 官方机器人图片发送测试",
 )
 
 public enum class QqBotIntent(public val bit: Int) {
@@ -45,7 +38,28 @@ private fun parseQqBotIntent(value: String): QqBotIntent? {
 }
 
 public object QqBotConfigForm {
-    public val migrations: List<ConfigMigration> = listOf()
+    /**
+     * 正式版移除的字段：沙箱预留项与调试回显/原始载荷开关。
+     * 配置加载开启了 `FAIL_ON_UNKNOWN_PROPERTIES`，残留旧键会导致加载失败，必须先删除。
+     */
+    private val REMOVED_LEGACY_FIELDS: List<String> = listOf(
+        "sandbox",
+        "debugLogPayloads",
+        "debugEchoText",
+        "debugEchoReply",
+        "debugImageEchoText",
+        "debugImageEchoSource",
+        "debugImageEchoCaption",
+    )
+
+    public val migrations: List<ConfigMigration> = listOf(
+        ConfigMigration(
+            id = "2026-09-14-remove-debug-fields",
+            description = "移除沙箱预留配置与调试回显相关字段",
+        ) {
+            REMOVED_LEGACY_FIELDS.forEach(::remove)
+        },
+    )
 
     public val spec: ConfigFormSpec = ConfigFormSpec(
         title = "QQ 官方机器人",
@@ -76,15 +90,6 @@ public object QqBotConfigForm {
                 section = "连接",
                 description = "QQ 开放平台分配的机器人密钥，用于获取访问令牌。",
                 secret = true,
-                restartRequired = true,
-                restartTarget = "QQ 官方机器人插件",
-            ),
-            ConfigFieldSpec(
-                path = "sandbox",
-                label = "沙箱环境",
-                type = ConfigFieldType.BOOLEAN,
-                section = "连接",
-                description = "预留配置；后续如果接入沙箱地址，在这里切换。",
                 restartRequired = true,
                 restartTarget = "QQ 官方机器人插件",
             ),
@@ -123,54 +128,6 @@ public object QqBotConfigForm {
                 restartRequired = true,
                 restartTarget = "QQ 官方机器人插件",
             ),
-            ConfigFieldSpec(
-                path = "debugLogPayloads",
-                label = "记录原始事件包",
-                type = ConfigFieldType.BOOLEAN,
-                section = "调试",
-                description = "开启后会在日志中记录收到的 WebSocket 原始载荷片段，排查连通性时临时使用。",
-                restartRequired = false,
-            ),
-            ConfigFieldSpec(
-                path = "debugEchoText",
-                label = "调试回显触发文本",
-                type = ConfigFieldType.TEXT,
-                section = "调试",
-                description = "填写后，当单聊或群聊收到完全相同的文本时，会直接回复调试回显内容；留空表示关闭。",
-                restartRequired = false,
-            ),
-            ConfigFieldSpec(
-                path = "debugEchoReply",
-                label = "调试回显回复内容",
-                type = ConfigFieldType.TEXT,
-                section = "调试",
-                description = "触发调试回显时发送的文本。",
-                restartRequired = false,
-            ),
-            ConfigFieldSpec(
-                path = "debugImageEchoText",
-                label = "调试图片触发文本",
-                type = ConfigFieldType.TEXT,
-                section = "调试",
-                description = "填写后，当单聊或群聊收到完全相同的文本时，会直接发送调试图片；留空表示关闭。",
-                restartRequired = false,
-            ),
-            ConfigFieldSpec(
-                path = "debugImageEchoSource",
-                label = "调试图片资源",
-                type = ConfigFieldType.TEXT,
-                section = "调试",
-                description = "调试图片使用的 HTTP(S) URL 或本地文件路径。本地文件会走分片上传，无需公网地址。",
-                restartRequired = false,
-            ),
-            ConfigFieldSpec(
-                path = "debugImageEchoCaption",
-                label = "调试图片说明",
-                type = ConfigFieldType.TEXT,
-                section = "调试",
-                description = "触发调试图片回显时附带的文本说明；留空时只发送图片占位文本。",
-                restartRequired = false,
-            ),
         ),
     )
 
@@ -182,13 +139,6 @@ public object QqBotConfigForm {
         }
         config.intents.forEach { intent ->
             require(intent.isNotBlank()) { "QQ 官方机器人事件订阅不能为空" }
-        }
-        require(config.debugEchoReply.isNotBlank()) { "QQ 官方机器人调试回显回复内容不能为空" }
-        if (config.debugImageEchoText.isNotBlank()) {
-            require(config.debugImageEchoSource.isNotBlank()) { "QQ 官方机器人调试图片资源不能为空" }
-            require(QqBotMessageMapper.toMediaResourceSource(QqBotMediaFileType.IMAGE, config.debugImageEchoSource) != null) {
-                "QQ 官方机器人调试图片资源必须是 HTTP(S) URL 或本地文件路径"
-            }
         }
         config.normalizedIntents()
     }

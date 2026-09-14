@@ -1,9 +1,9 @@
 package top.colter.dynamic.qqbot
 
-import java.nio.file.Files
-import java.nio.file.Path
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import top.colter.dynamic.core.config.MutableConfigDocument
 
 class QqBotConfigFormTest {
     @Test
@@ -30,84 +30,60 @@ class QqBotConfigFormTest {
     }
 
     @Test
-    fun `调试回显回复内容不能为空`() {
+    fun `事件订阅不能为空白`() {
         assertFailsWith<IllegalArgumentException> {
-            QqBotConfigForm.validate(QqBotConfig(debugEchoReply = "   "))
+            QqBotConfigForm.validate(QqBotConfig(intents = listOf("   ")))
         }
     }
 
     @Test
-    fun `调试图片回显需要图片资源`() {
+    fun `未知事件订阅会被拒绝`() {
         assertFailsWith<IllegalArgumentException> {
-            QqBotConfigForm.validate(QqBotConfig(debugImageEchoText = "发图"))
+            QqBotConfigForm.validate(QqBotConfig(intents = listOf("NOT_AN_INTENT")))
         }
     }
 
     @Test
-    fun `调试图片回显接受 HTTP 图片资源`() {
-        QqBotConfigForm.validate(
-            QqBotConfig(
-                debugImageEchoText = "发图",
-                debugImageEchoSource = "https://example.com/a.png",
+    fun `迁移会移除正式版已删除的旧字段`() {
+        val document = FakeMutableConfigDocument(
+            mutableMapOf(
+                "enabled" to true,
+                "appId" to "123456",
+                "sandbox" to true,
+                "debugLogPayloads" to true,
+                "debugEchoText" to "ping",
+                "debugEchoReply" to "pong",
+                "debugImageEchoText" to "发图",
+                "debugImageEchoSource" to "https://example.com/a.png",
+                "debugImageEchoCaption" to "说明",
             ),
         )
+
+        QqBotConfigForm.migrations.forEach { migration -> migration.apply(document) }
+
+        assertEquals(setOf("enabled", "appId"), document.keys())
+    }
+}
+
+private class FakeMutableConfigDocument(
+    private val values: MutableMap<String, Any?>,
+) : MutableConfigDocument {
+    fun keys(): Set<String> = values.keys.toSet()
+
+    override fun contains(path: String): Boolean = values.containsKey(path)
+
+    override fun get(path: String): Any? = values[path]
+
+    override fun set(path: String, value: Any?) {
+        values[path] = value
     }
 
-    @Test
-    fun `调试图片回显接受本地图片资源`() {
-        val image = createTempImage()
-        QqBotConfigForm.validate(
-            QqBotConfig(
-                debugImageEchoText = "发图",
-                debugImageEchoSource = image.toUri().toString(),
-            ),
-        )
-    }
+    override fun remove(path: String): Boolean = values.remove(path) != null
 
-    @Test
-    fun `调试图片回显接受 Windows 盘符路径`() {
-        // `D:/x.png` 会被 URI 解析成 scheme=D，盘符路径必须在该分支前识别
-        val image = createTempImage()
-        QqBotConfigForm.validate(
-            QqBotConfig(
-                debugImageEchoText = "发图",
-                debugImageEchoSource = image.toString().replace('\\', '/'),
-            ),
-        )
-        QqBotConfigForm.validate(
-            QqBotConfig(
-                debugImageEchoText = "发图",
-                debugImageEchoSource = image.toString(),
-            ),
-        )
-    }
-
-    @Test
-    fun `调试图片回显拒绝不存在的本地路径`() {
-        assertFailsWith<IllegalArgumentException> {
-            QqBotConfigForm.validate(
-                QqBotConfig(
-                    debugImageEchoText = "发图",
-                    debugImageEchoSource = "file:///qqbot/missing/image.png",
-                ),
-            )
-        }
-        assertFailsWith<IllegalArgumentException> {
-            QqBotConfigForm.validate(
-                QqBotConfig(
-                    debugImageEchoText = "发图",
-                    debugImageEchoSource = "D:/qqbot/missing/image.png",
-                ),
-            )
-        }
-    }
-
-    private fun createTempImage(): Path {
-        val dir = Files.createTempDirectory("qqbot-config-test")
-        val file = dir.resolve("image.png")
-        Files.write(file, byteArrayOf(1, 2, 3, 4))
-        file.toFile().deleteOnExit()
-        dir.toFile().deleteOnExit()
-        return file
+    override fun move(from: String, to: String, overwrite: Boolean): Boolean {
+        if (!values.containsKey(from)) return false
+        if (!overwrite && values.containsKey(to)) return false
+        values[to] = values.remove(from)
+        return true
     }
 }

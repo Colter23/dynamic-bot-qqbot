@@ -142,7 +142,7 @@ internal class JavaNetQqBotWebSocketGateway(
         requireAccount(accountId)
         val resource = resolveMediaResource(scope, media)
         openApiClient.sendMessage(scope, request.copy(mediaFileInfo = resource.fileInfo)).also { receipt ->
-            logger.info { "QQ 官方机器人富媒体消息已发送：scope=${scope.resource}/${scope.id} messageId=${receipt.messageId}" }
+            logger.debug { "QQ 官方机器人富媒体消息已发送：scope=${scope.resource}/${scope.id} messageId=${receipt.messageId}" }
         }
     }
 
@@ -164,7 +164,7 @@ internal class JavaNetQqBotWebSocketGateway(
         scope: QqBotOpenApiScope,
         media: QqBotMediaResourceSource,
     ): QqBotMediaResource {
-        logger.info {
+        logger.debug {
             "QQ 官方机器人正在登记富媒体资源：scope=${scope.resource}/${scope.id} type=${media.fileType.label} source=${media.sourceLabel()}"
         }
         val localFile = media.localFile
@@ -185,7 +185,7 @@ internal class JavaNetQqBotWebSocketGateway(
                 request = QqBotMediaPrepareRequest(fileType = media.fileType, url = url),
             )
         }
-        logger.info { "QQ 官方机器人富媒体资源已登记：type=${media.fileType.label} ttl=${resource.ttlSeconds ?: "-"}" }
+        logger.debug { "QQ 官方机器人富媒体资源已登记：type=${media.fileType.label} ttl=${resource.ttlSeconds ?: "-"}" }
         return resource
     }
 
@@ -313,7 +313,7 @@ internal class JavaNetQqBotWebSocketGateway(
             ?: return
 
         frame.sequence?.let { latestSequence = it }
-        logFrame(frame, payload)
+        logFrame(frame)
 
         when (frame.opcode) {
             QqBotOpcode.HELLO -> handleHello(payload)
@@ -349,7 +349,7 @@ internal class JavaNetQqBotWebSocketGateway(
             rawPayload = dispatch.rawPayload,
             botAccountId = config.appId.trim().takeIf { it.isNotBlank() },
         )
-        logger.info { "收到 QQ 官方机器人 Dispatch 事件：type=${event.type} seq=${dispatch.sequence ?: "-"}" }
+        logger.debug { "收到 QQ 官方机器人 Dispatch 事件：type=${event.type} seq=${dispatch.sequence ?: "-"}" }
         incomingEventHandler?.invoke(event)
     }
 
@@ -496,14 +496,11 @@ internal class JavaNetQqBotWebSocketGateway(
         }
     }
 
-    private fun logFrame(frame: QqBotWebSocketFrame, payload: String) {
+    private fun logFrame(frame: QqBotWebSocketFrame) {
         if (frame.opcode == QqBotOpcode.DISPATCH || frame.opcode == QqBotOpcode.INVALID_SESSION) {
-            logger.info {
+            logger.debug {
                 "收到 QQ 官方机器人 WebSocket 帧：op=${frame.opcode.code} type=${frame.type.orEmpty().ifBlank { "-" }} seq=${frame.sequence ?: "-"}"
             }
-        }
-        if (config.debugLogPayloads) {
-            logger.info { "QQ 官方机器人 WebSocket 原始载荷：${payload.take(MAX_DEBUG_PAYLOAD_CHARS)}" }
         }
     }
 
@@ -536,7 +533,6 @@ internal class JavaNetQqBotWebSocketGateway(
     }
 }
 
-private const val MAX_DEBUG_PAYLOAD_CHARS: Int = 2_000
 private const val DEFAULT_MEDIA_FILE_NAME: String = "media"
 
 internal interface QqBotWebSocketConnector {

@@ -39,7 +39,6 @@ QQ 官方机器人插件，用于通过 QQ 官方 API v2 接入 dynamic-bot。
    - HTTP(S) URL：调用 `/files` 传 `url`，平台下载转存后拿到 `file_info`；
    - 本地文件：走分片上传（`upload_prepare` → 分片 PUT → `upload_part_finish` → 携带 `upload_id` 合并），拿到 `file_info`。
 7. 用 `msg_type = 7` 携带 `media.file_info` 发送消息。
-8. 后续再补文件类型、按钮和更细致的错误重试。
 
 ### 当前限制
 
@@ -76,21 +75,12 @@ autoPublishIncoming: true
 
 `autoPublishIncoming` 开启后，插件只发布标准入站消息；命令前缀匹配、群聊开头 at 当前 Bot 的规范化、链接识别和普通消息插件过滤都由主项目管线完成。平台原始消息 ID 会作为回复目标传入命令结果发送链路，便于 QQ 官方接口按原消息回复。
 
-## 连通性调试
+## 日志
 
-如果机器人已启动但没有回复，可以先临时打开原始载荷日志和调试回显：
+插件只在生命周期与状态变化时输出 `INFO`：配置加载、启动/停止、WebSocket 打开、Hello、Identify、READY、RESUMED、重连调度，以及各类失败（`WARN`/`ERROR`）。
 
-```yaml
-debugLogPayloads: true
-debugEchoText: "ping"
-debugEchoReply: "QQ 官方机器人 WebSocket 连通性正常"
-debugImageEchoText: "发图"
-debugImageEchoSource: "D:/path/to/image.png"
-debugImageEchoCaption: "QQ 官方机器人图片发送测试"
-```
+逐条消息、逐帧、逐次发送与富媒体资源登记等细节统一降为 `DEBUG`，正常运行时不会刷屏。
 
-然后在单聊发送 `ping`，或在群聊中按实际收到的文本配置触发内容。群聊消息如果以 `<@机器人> ` 开头，调试回显匹配时会自动忽略这个开头 at。日志中应至少能看到 WebSocket 打开、Hello、Identify、READY、Dispatch、入站消息解析；如果能收到入站消息但回显失败，继续看 OpenAPI 发送失败日志。排查完成后建议关闭 `debugLogPayloads`，避免日志中长期记录原始消息载荷。
-
-图片发送可以临时配置 `debugImageEchoText` 和 `debugImageEchoSource`。`debugImageEchoSource` 支持 HTTP(S) URL 或本地文件路径；本地文件会走分片上传，因此部署机器没有公网 IP 时也能直接验证。触发后日志中应看到“调试图片回显已触发”和“调试图片发送成功”；如果失败，错误日志会包含分片上传或消息发送接口返回的业务错误。
+需要排查连通性时，把主程序日志级别调到 `DEBUG`（环境变量 `LOG_LEVEL=DEBUG`）即可看到入站事件类型、入站消息解析结果、Dispatch 帧与富媒体登记过程，**无需修改插件配置**。
 
 频道相关能力暂不作为本插件初始目标。

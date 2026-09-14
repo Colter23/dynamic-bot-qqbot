@@ -6,15 +6,16 @@ import java.nio.file.Path
 import java.nio.file.Paths
 import java.time.Instant
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
 import top.colter.dynamic.core.data.IncomingMessage
+import top.colter.dynamic.core.data.IncomingMessageReference
 import top.colter.dynamic.core.data.IncomingMessageSegment
 import top.colter.dynamic.core.data.MessageBatch
 import top.colter.dynamic.core.data.MessageContent
@@ -303,7 +304,7 @@ internal object QqBotIncomingMessageMapper {
 
     fun toIncomingMessage(event: QqBotIncomingEvent): IncomingMessage? {
         val dispatch = runCatching { QqBotWebSocketProtocol.parseDispatch(event.rawPayload) }.getOrNull() ?: return null
-        val data = dispatch.data.jsonObject
+        val data = dispatch.data.asObjectOrNull() ?: return null
         return when (event.type) {
             QQBOT_C2C_MESSAGE_CREATE -> data.toC2cIncoming(event)
             QQBOT_GROUP_AT_MESSAGE_CREATE -> data.toGroupIncoming(event, mentionedBot = true)
@@ -325,7 +326,7 @@ internal object QqBotIncomingMessageMapper {
     fun toTargetSighting(event: QqBotIncomingEvent): QqBotTargetSighting? {
         val dispatch = runCatching { QqBotWebSocketProtocol.parseDispatch(event.rawPayload) }.getOrNull()
             ?: return null
-        val data = dispatch.data.jsonObject
+        val data = dispatch.data.asObjectOrNull() ?: return null
         val timestamp = data.longOf("timestamp") ?: 0L
         return when (event.type) {
             QQBOT_C2C_MESSAGE_CREATE -> data.jsonString("author", "user_openid")
@@ -355,7 +356,8 @@ internal object QqBotIncomingMessageMapper {
         val messageId = jsonString("id")
         val content = jsonString("content").orEmpty()
         val attachments = attachments()
-        val segments = buildSegments(content, attachments, arkLink = arkLinkSegment(event))
+        val quoted = quotedMessage()
+        val segments = buildSegments(content, attachments, arkLink = arkLinkSegment(event), quote = quoted?.toSegment())
         return IncomingMessage(
             platformId = QQBOT_PLATFORM_ID,
             target = TargetAddress.of(
@@ -367,6 +369,7 @@ internal object QqBotIncomingMessageMapper {
             senderId = senderId,
             botAccountId = event.botAccountId,
             messageId = messageId.orEmpty(),
+            replyTo = quoted?.toReference(),
             timestamp = timestampSeconds(),
             text = content,
             segments = segments,
@@ -384,7 +387,14 @@ internal object QqBotIncomingMessageMapper {
         val content = jsonString("content").orEmpty()
         val attachments = attachments()
         val mentionItems = mentionItems(event)
-        val segments = buildSegments(content, attachments, mentionItems, arkLink = arkLinkSegment(event))
+        val quoted = quotedMessage()
+        val segments = buildSegments(
+            content = content,
+            attachments = attachments,
+            mentions = mentionItems,
+            arkLink = arkLinkSegment(event),
+            quote = quoted?.toSegment(),
+        )
         val mentions = mentionItems.mentionedAccountIds(event, mentionedBot)
         return IncomingMessage(
             platformId = QQBOT_PLATFORM_ID,
@@ -397,6 +407,7 @@ internal object QqBotIncomingMessageMapper {
             senderId = senderId,
             botAccountId = event.botAccountId,
             messageId = messageId.orEmpty(),
+            replyTo = quoted?.toReference(),
             timestamp = timestampSeconds(),
             text = content,
             segments = segments,
@@ -421,14 +432,88 @@ internal object QqBotIncomingMessageMapper {
         attachments: List<QqBotIncomingAttachment>,
         mentions: List<QqBotIncomingMention> = emptyList(),
         arkLink: IncomingMessageSegment.Link? = null,
+        quote: IncomingMessageSegment.Reply? = null,
     ): List<IncomingMessageSegment> {
         return buildList {
+            if (quote != null) add(quote)
             addAll(content.toTextAndMentionSegments(mentions))
             attachments.forEach { attachment ->
                 add(attachment.toSegment())
             }
             if (arkLink != null) add(arkLink)
         }
+    }
+
+    /**
+     * 引用消息（`message_type=103`）：引用索引优先取 `message_scene.ext.ref_msg_idx`；
+     * 仅在 `message_type=103` 时才回退 `msg_elements[0].msg_idx`，避免把同样携带
+     * `msg_elements` 的 101 并行消息 / 102 聊天记录误判为引用。被引用内容可能已被
+     * 平台折叠，只保留索引与原文载荷。
+     */
+    private fun JsonObject.quotedMessage(): QqBotQuotedMessage? {
+        val explicitIndex = messageSceneExt()["ref_msg_idx"]?.trim()?.takeIf { it.isNotBlank() }
+        if (explicitIndex == null && messageType() != QQBOT_MESSAGE_TYPE_QUOTE) return null
+        val elements = msgElements()
+        val quotedIndex = explicitIndex
+            ?: elements.firstOrNull()?.index?.trim()?.takeIf { it.isNotBlank() }
+            ?: return null
+        val quoted = elements.firstOrNull { it.index == quotedIndex } ?: elements.firstOrNull()
+        return QqBotQuotedMessage(
+            messageId = quotedIndex,
+            senderId = quoted?.senderId,
+            rawPayload = quoted?.rawPayload.orEmpty(),
+        )
+    }
+
+    /** `message_scene.ext` 为 `key=value` 字符串列表；非字符串元素与空值忽略。 */
+    private fun JsonObject.messageSceneExt(): Map<String, String> {
+        return get("message_scene")
+            ?.asObjectOrNull()
+            ?.get("ext")
+            ?.asArrayOrNull()
+            ?.mapNotNull { element ->
+                val item = element.asPrimitiveOrNull()?.contentOrNull?.trim() ?: return@mapNotNull null
+                val separator = item.indexOf('=')
+                if (separator <= 0 || separator == item.lastIndex) {
+                    null
+                } else {
+                    item.substring(0, separator) to item.substring(separator + 1)
+                }
+            }
+            ?.toMap()
+            .orEmpty()
+    }
+
+    private fun JsonObject.msgElements(): List<QqBotMsgElement> {
+        return get("msg_elements")
+            ?.asArrayOrNull()
+            ?.mapNotNull { element ->
+                val item = element.asObjectOrNull() ?: return@mapNotNull null
+                val index = item.jsonString("msg_idx") ?: return@mapNotNull null
+                QqBotMsgElement(
+                    index = index,
+                    senderId = item.jsonString("author", "member_openid")
+                        ?: item.jsonString("author", "user_openid")
+                        ?: item.jsonString("author", "openid"),
+                    rawPayload = json.encodeToString(JsonElement.serializer(), element),
+                )
+            }
+            .orEmpty()
+    }
+
+    private fun QqBotQuotedMessage.toSegment(): IncomingMessageSegment.Reply {
+        return IncomingMessageSegment.Reply(
+            messageId = messageId,
+            rawPayload = rawPayload.takeIf { it.isNotBlank() },
+        )
+    }
+
+    private fun QqBotQuotedMessage.toReference(): IncomingMessageReference {
+        return IncomingMessageReference(
+            messageId = messageId,
+            senderId = senderId,
+            rawPayload = rawPayload.takeIf { it.isNotBlank() },
+        )
     }
 
     /** `message_type=3` 的卡片消息：从 `ark_data.fields` 提取明确跳转链接。 */
@@ -488,9 +573,9 @@ internal object QqBotIncomingMessageMapper {
 
     private fun JsonObject.attachments(): List<QqBotIncomingAttachment> {
         return get("attachments")
-            ?.jsonArray
+            ?.asArrayOrNull()
             ?.mapNotNull { element ->
-                val item = element.jsonObject
+                val item = element.asObjectOrNull() ?: return@mapNotNull null
                 QqBotIncomingAttachment(
                     contentType = item.jsonString("content_type").orEmpty(),
                     filename = item.jsonString("filename").orEmpty(),
@@ -503,11 +588,11 @@ internal object QqBotIncomingMessageMapper {
 
     private fun JsonObject.mentionItems(event: QqBotIncomingEvent): List<QqBotIncomingMention> {
         return get("mentions")
-            ?.jsonArray
+            ?.asArrayOrNull()
             ?.mapNotNull { element ->
-                val item = element.jsonObject
+                val item = element.asObjectOrNull() ?: return@mapNotNull null
                 val rawId = item.jsonString("member_openid") ?: item.jsonString("id") ?: return@mapNotNull null
-                val isCurrentBot = item["is_you"]?.jsonPrimitive?.booleanOrNull == true
+                val isCurrentBot = item["is_you"]?.asPrimitiveOrNull()?.booleanOrNull == true
                 QqBotIncomingMention(
                     rawId = rawId,
                     accountId = if (isCurrentBot) {
@@ -528,7 +613,7 @@ internal object QqBotIncomingMessageMapper {
 
     private fun JsonObject.jsonString(name: String): String? {
         return get(name)
-            ?.jsonPrimitive
+            ?.asPrimitiveOrNull()
             ?.contentOrNull
             ?.trim()
             ?.takeIf { it.isNotBlank() }
@@ -536,15 +621,27 @@ internal object QqBotIncomingMessageMapper {
 
     private fun JsonObject.longOf(name: String): Long? {
         return get(name)
-            ?.jsonPrimitive
+            ?.asPrimitiveOrNull()
             ?.let { primitive -> primitive.longOrNull ?: primitive.contentOrNull?.toLongOrNull() }
     }
 
     private fun JsonObject.jsonString(parent: String, name: String): String? {
         return get(parent)
-            ?.jsonObject
+            ?.asObjectOrNull()
             ?.jsonString(name)
     }
+
+    /** 事件体中的 `message_type`：官方为整数，同时兼容字符串形式。 */
+    private fun JsonObject.messageType(): Int? {
+        val primitive = get("message_type")?.asPrimitiveOrNull() ?: return null
+        return primitive.intOrNull ?: primitive.contentOrNull?.trim()?.toIntOrNull()
+    }
+
+    private fun JsonElement.asObjectOrNull(): JsonObject? = this as? JsonObject
+
+    private fun JsonElement.asArrayOrNull(): JsonArray? = this as? JsonArray
+
+    private fun JsonElement.asPrimitiveOrNull(): JsonPrimitive? = this as? JsonPrimitive
 }
 
 private data class QqBotIncomingAttachment(
@@ -557,6 +654,20 @@ private data class QqBotIncomingAttachment(
 private data class QqBotIncomingMention(
     val rawId: String,
     val accountId: String,
+    val rawPayload: String,
+)
+
+/** 被引用的消息：[messageId] 为平台消息索引（如 `REFIDX_xxx==`），用于回复时携带引用。 */
+private data class QqBotQuotedMessage(
+    val messageId: String,
+    val senderId: String?,
+    val rawPayload: String,
+)
+
+/** `msg_elements` 中的一条被引用消息元素。 */
+private data class QqBotMsgElement(
+    val index: String,
+    val senderId: String?,
     val rawPayload: String,
 )
 
@@ -574,6 +685,7 @@ internal const val QQBOT_GROUP_MSG_RECEIVE: String = "GROUP_MSG_RECEIVE"
 internal const val QQBOT_GROUP_MSG_REJECT: String = "GROUP_MSG_REJECT"
 internal const val QQBOT_TEXT_MSG_TYPE: Int = 0
 internal const val QQBOT_MEDIA_MSG_TYPE: Int = 7
+internal const val QQBOT_MESSAGE_TYPE_QUOTE: Int = 103
 private const val QQBOT_EMPTY_MESSAGE_TEXT: String = "（空消息）"
 private const val QQBOT_MENTION_ALL_FALLBACK: String = "@全体成员"
 private val QQBOT_OFFICIAL_MENTION_PATTERN: Regex = Regex("""<@([^>]+)>""")

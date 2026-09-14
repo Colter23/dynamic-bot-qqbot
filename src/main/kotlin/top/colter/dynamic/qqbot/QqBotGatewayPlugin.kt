@@ -311,7 +311,11 @@ public class QqBotGatewayPlugin :
             logger.info { "QQ 官方机器人入站事件原始载荷：${event.rawPayload.take(MAX_DEBUG_PAYLOAD_CHARS)}" }
         }
         recordTargetSighting(event)
-        val incoming = QqBotIncomingMessageMapper.toIncomingMessage(event)
+        val incoming = runCatching { QqBotIncomingMessageMapper.toIncomingMessage(event) }
+            .onFailure { error ->
+                logger.warn(error) { "QQ 官方机器人入站消息解析失败：type=${event.type}" }
+            }
+            .getOrNull()
         if (incoming == null) {
             logger.debug { "忽略 QQ 官方机器人入站事件：type=${event.type}" }
             return
@@ -351,8 +355,8 @@ public class QqBotGatewayPlugin :
 
     private fun recordTargetSighting(event: QqBotIncomingEvent) {
         val ledger = targetLedger ?: return
-        val sighting = QqBotIncomingMessageMapper.toTargetSighting(event) ?: return
         runCatching {
+            val sighting = QqBotIncomingMessageMapper.toTargetSighting(event) ?: return
             val removed = when (event.type) {
                 QQBOT_GROUP_DEL_ROBOT, QQBOT_FRIEND_DEL -> true
                 else -> false

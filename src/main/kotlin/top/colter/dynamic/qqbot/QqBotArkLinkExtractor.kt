@@ -5,8 +5,6 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import top.colter.dynamic.core.data.IncomingMessageSegment
 
 /**
@@ -33,9 +31,9 @@ internal object QqBotArkLinkExtractor {
     private val titleKeys: List<String> = listOf("title", "desc", "name", "prompt")
 
     fun extract(arkData: JsonElement?, rawPayload: String): IncomingMessageSegment.Link? {
-        val card = arkData?.jsonObject ?: return null
+        val card = arkData as? JsonObject ?: return null
         // 官方 `ark_data` 的业务字段在 `fields` 对象里；`prompt`/`ark_name` 在顶层
-        val fields = card["fields"]?.let { runCatching { it.jsonObject }.getOrNull() }
+        val fields = card["fields"] as? JsonObject
         val url = urlKeys.asSequence()
             .mapNotNull { key -> fields?.stringValue(key) ?: card.stringValue(key) }
             .mapNotNull(::normalizeHttpUrl)

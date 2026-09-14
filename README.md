@@ -23,6 +23,7 @@ QQ 官方机器人插件，用于通过 QQ 官方 API v2 接入 dynamic-bot。
 - 入站消息提交到主项目统一管线，由主项目识别命令、链接和普通消息。
 - `ark_data` 结构化卡片（B 站视频分享、小程序等）提取跳转链接为链接段，配合主项目"解析平台卡片链接"开关使用。
 - `MessageContent.Mention` 映射为官方 at 协议 `<qqbot-at-user id="" />`；`MentionAll` 官方群聊不支持，降级为"@全体成员"纯文本。
+- 入站引用消息（`message_type=103`）解析为回复段并填充 `IncomingMessage.replyTo`：引用索引取 `message_scene.ext.ref_msg_idx`，缺失时回退 `msg_elements`；非引用消息不产生回复段。
 - 本地文件富媒体走官方分片上传（预上传 → 分片 PUT → 分片完成 → 合并），无需公网可访问地址；媒体投递建议优先使用本地文件。
 - 消息目标账本：从入站消息与群/好友生命周期事件积累 `group_openid` / `user_openid`，持久化到插件数据目录；后台"可选目标"列表由账本提供，无需手填 OpenID。被移出群、删除好友后自动从列表隐藏。
 - 插件边界测试，避免直接依赖主程序运行时实现。

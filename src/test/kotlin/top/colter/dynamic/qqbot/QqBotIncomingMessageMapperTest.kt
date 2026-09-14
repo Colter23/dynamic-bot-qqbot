@@ -336,4 +336,221 @@ class QqBotIncomingMessageMapperTest {
         requireNotNull(incoming)
         assertEquals(0, incoming.segments.filterIsInstance<IncomingMessageSegment.Link>().size)
     }
+
+    @Test
+    fun `群引用消息产生回复段并携带引用目标`() {
+        val incoming = QqBotIncomingMessageMapper.toIncomingMessage(
+            QqBotIncomingEvent(
+                type = QQBOT_GROUP_MESSAGE_CREATE,
+                botAccountId = "bot-app-id",
+                rawPayload = """
+                    {
+                      "op":0,
+                      "s":9,
+                      "t":"GROUP_MESSAGE_CREATE",
+                      "d":{
+                        "id":"group-msg-quote",
+                        "group_openid":"group-openid",
+                        "author":{"member_openid":"member-openid","member_role":"owner"},
+                        "content":"这个建议很有帮助，谢谢你！",
+                        "message_type":103,
+                        "msg_elements":[
+                          {
+                            "msg_idx":"REFIDX_aaaaaaaaaaaaaaa==",
+                            "message_type":103,
+                            "content":"每天坚持阅读半小时",
+                            "author":{"member_openid":"other-member"}
+                          }
+                        ],
+                        "message_scene":{
+                          "source":"default",
+                          "ext":[
+                            "ref_msg_idx=REFIDX_aaaaaaaaaaaaaaa==",
+                            "msg_idx=REFIDX_zzzzzzzzzzzzzzz=="
+                          ]
+                        },
+                        "timestamp":"2026-06-19T04:00:00Z"
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+
+        requireNotNull(incoming)
+        assertEquals("这个建议很有帮助，谢谢你！", incoming.text)
+        assertEquals(2, incoming.segments.size)
+        val reply = assertIs<IncomingMessageSegment.Reply>(incoming.segments[0])
+        assertEquals("REFIDX_aaaaaaaaaaaaaaa==", reply.messageId)
+        assertEquals(
+            "这个建议很有帮助，谢谢你！",
+            assertIs<IncomingMessageSegment.Text>(incoming.segments[1]).text,
+        )
+        assertEquals("REFIDX_aaaaaaaaaaaaaaa==", incoming.replyTo?.messageId)
+        assertEquals("other-member", incoming.replyTo?.senderId)
+    }
+
+    @Test
+    fun `单聊引用消息缺少 msg_elements 时回退 ref_msg_idx`() {
+        val incoming = QqBotIncomingMessageMapper.toIncomingMessage(
+            QqBotIncomingEvent(
+                type = QQBOT_C2C_MESSAGE_CREATE,
+                botAccountId = "bot-app-id",
+                rawPayload = """
+                    {
+                      "op":0,
+                      "s":10,
+                      "t":"C2C_MESSAGE_CREATE",
+                      "d":{
+                        "id":"msg-quote",
+                        "author":{"user_openid":"user-openid"},
+                        "content":"同意",
+                        "message_type":103,
+                        "message_scene":{
+                          "source":"default",
+                          "ext":["ref_msg_idx=REFIDX_c2c=="]
+                        },
+                        "timestamp":"2026-06-19T04:00:00Z"
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+
+        requireNotNull(incoming)
+        assertEquals(2, incoming.segments.size)
+        assertEquals("REFIDX_c2c==", assertIs<IncomingMessageSegment.Reply>(incoming.segments[0]).messageId)
+        assertEquals("REFIDX_c2c==", incoming.replyTo?.messageId)
+        assertNull(incoming.replyTo?.senderId)
+    }
+
+    @Test
+    fun `非引用消息不产生回复段与引用目标`() {
+        val incoming = QqBotIncomingMessageMapper.toIncomingMessage(
+            QqBotIncomingEvent(
+                type = QQBOT_C2C_MESSAGE_CREATE,
+                botAccountId = "bot-app-id",
+                rawPayload = """
+                    {
+                      "op":0,
+                      "s":11,
+                      "t":"C2C_MESSAGE_CREATE",
+                      "d":{
+                        "id":"msg-plain",
+                        "author":{"user_openid":"user-openid"},
+                        "content":"普通消息",
+                        "message_type":0,
+                        "message_scene":{"source":"default","ext":["msg_idx=REFIDX_self=="]},
+                        "timestamp":"2026-06-19T04:00:00Z"
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+
+        requireNotNull(incoming)
+        assertEquals(0, incoming.segments.filterIsInstance<IncomingMessageSegment.Reply>().size)
+        assertNull(incoming.replyTo)
+    }
+
+    @Test
+    fun `引用消息缺少 ref_msg_idx 时回退 msg_elements 索引`() {
+        val incoming = QqBotIncomingMessageMapper.toIncomingMessage(
+            QqBotIncomingEvent(
+                type = QQBOT_GROUP_MESSAGE_CREATE,
+                botAccountId = "bot-app-id",
+                rawPayload = """
+                    {
+                      "op":0,
+                      "s":12,
+                      "t":"GROUP_MESSAGE_CREATE",
+                      "d":{
+                        "id":"group-msg-quote-fallback",
+                        "group_openid":"group-openid",
+                        "author":{"member_openid":"member-openid"},
+                        "content":"收到",
+                        "message_type":103,
+                        "msg_elements":[
+                          {
+                            "msg_idx":"REFIDX_quoted==",
+                            "content":"被引用内容",
+                            "author":{"member_openid":"quoted-member"}
+                          }
+                        ],
+                        "message_scene":{"source":"default","ext":["msg_idx=REFIDX_self=="]},
+                        "timestamp":"2026-06-19T04:00:00Z"
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+
+        requireNotNull(incoming)
+        assertEquals("REFIDX_quoted==", assertIs<IncomingMessageSegment.Reply>(incoming.segments[0]).messageId)
+        assertEquals("REFIDX_quoted==", incoming.replyTo?.messageId)
+        assertEquals("quoted-member", incoming.replyTo?.senderId)
+    }
+
+    @Test
+    fun `非引用类型带 msg_elements 时不误判为引用`() {
+        val incoming = QqBotIncomingMessageMapper.toIncomingMessage(
+            QqBotIncomingEvent(
+                type = QQBOT_GROUP_MESSAGE_CREATE,
+                botAccountId = "bot-app-id",
+                rawPayload = """
+                    {
+                      "op":0,
+                      "s":13,
+                      "t":"GROUP_MESSAGE_CREATE",
+                      "d":{
+                        "id":"group-msg-record",
+                        "group_openid":"group-openid",
+                        "author":{"member_openid":"member-openid"},
+                        "content":"",
+                        "message_type":102,
+                        "msg_elements":[
+                          {"msg_idx":"REFIDX_record==","content":"=== 消息 1 ==="}
+                        ],
+                        "message_scene":{"source":"default","ext":["msg_idx=REFIDX_self=="]},
+                        "timestamp":"2026-06-19T04:00:00Z"
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+
+        requireNotNull(incoming)
+        assertEquals(0, incoming.segments.filterIsInstance<IncomingMessageSegment.Reply>().size)
+        assertNull(incoming.replyTo)
+    }
+
+    @Test
+    fun `畸形 message_scene 与 msg_elements 不会抛异常`() {
+        val incoming = QqBotIncomingMessageMapper.toIncomingMessage(
+            QqBotIncomingEvent(
+                type = QQBOT_C2C_MESSAGE_CREATE,
+                botAccountId = "bot-app-id",
+                rawPayload = """
+                    {
+                      "op":0,
+                      "s":14,
+                      "t":"C2C_MESSAGE_CREATE",
+                      "d":{
+                        "id":"msg-malformed",
+                        "author":{"user_openid":"user-openid"},
+                        "content":"你好",
+                        "message_type":103,
+                        "msg_elements":[123,"not-an-object"],
+                        "message_scene":{"source":"default","ext":[1,{"a":1},"ref_msg_idx="]},
+                        "timestamp":"2026-06-19T04:00:00Z"
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+
+        requireNotNull(incoming)
+        assertEquals("你好", incoming.text)
+        assertEquals(1, incoming.segments.size)
+        assertNull(incoming.replyTo)
+    }
 }

@@ -6,14 +6,11 @@ import java.nio.file.Path
 import java.nio.file.Paths
 import java.time.Instant
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.longOrNull
 import top.colter.dynamic.core.data.IncomingMessage
 import top.colter.dynamic.core.data.IncomingMessageReference
 import top.colter.dynamic.core.data.IncomingMessageSegment
@@ -30,12 +27,10 @@ internal data class QqBotSendRequest(
     val mediaFileInfo: String? = null,
 )
 
-/** 入站事件中提取的消息目标 sighting，供目标账本记录。 */
+/** 从入站事件中提取到的目标：账本只需要类型与 openid。 */
 internal data class QqBotTargetSighting(
     val kind: TargetKind,
     val externalId: String,
-    val event: String,
-    val timestampEpochSeconds: Long,
 )
 
 internal data class QqBotSendReceipt(
@@ -327,26 +322,23 @@ internal object QqBotIncomingMessageMapper {
         val dispatch = runCatching { QqBotWebSocketProtocol.parseDispatch(event.rawPayload) }.getOrNull()
             ?: return null
         val data = dispatch.data.asObjectOrNull() ?: return null
-        val timestamp = data.longOf("timestamp") ?: 0L
         return when (event.type) {
             QQBOT_C2C_MESSAGE_CREATE -> data.jsonString("author", "user_openid")
-                ?.let { QqBotTargetSighting(TargetKind.USER, it, event.type, timestamp) }
+                ?.let { QqBotTargetSighting(TargetKind.USER, it) }
             QQBOT_GROUP_AT_MESSAGE_CREATE,
             QQBOT_GROUP_MESSAGE_CREATE,
-            -> data.jsonString("group_openid")
-                ?.let { QqBotTargetSighting(TargetKind.GROUP, it, event.type, timestamp) }
             QQBOT_GROUP_ADD_ROBOT,
             QQBOT_GROUP_DEL_ROBOT,
             QQBOT_GROUP_MSG_RECEIVE,
             QQBOT_GROUP_MSG_REJECT,
             -> data.jsonString("group_openid")
-                ?.let { QqBotTargetSighting(TargetKind.GROUP, it, event.type, timestamp) }
+                ?.let { QqBotTargetSighting(TargetKind.GROUP, it) }
             QQBOT_FRIEND_ADD,
             QQBOT_FRIEND_DEL,
             QQBOT_C2C_MSG_RECEIVE,
             QQBOT_C2C_MSG_REJECT,
             -> data.jsonString("openid")
-                ?.let { QqBotTargetSighting(TargetKind.USER, it, event.type, timestamp) }
+                ?.let { QqBotTargetSighting(TargetKind.USER, it) }
             else -> null
         }
     }
@@ -619,12 +611,6 @@ internal object QqBotIncomingMessageMapper {
             ?.takeIf { it.isNotBlank() }
     }
 
-    private fun JsonObject.longOf(name: String): Long? {
-        return get(name)
-            ?.asPrimitiveOrNull()
-            ?.let { primitive -> primitive.longOrNull ?: primitive.contentOrNull?.toLongOrNull() }
-    }
-
     private fun JsonObject.jsonString(parent: String, name: String): String? {
         return get(parent)
             ?.asObjectOrNull()
@@ -636,12 +622,6 @@ internal object QqBotIncomingMessageMapper {
         val primitive = get("message_type")?.asPrimitiveOrNull() ?: return null
         return primitive.intOrNull ?: primitive.contentOrNull?.trim()?.toIntOrNull()
     }
-
-    private fun JsonElement.asObjectOrNull(): JsonObject? = this as? JsonObject
-
-    private fun JsonElement.asArrayOrNull(): JsonArray? = this as? JsonArray
-
-    private fun JsonElement.asPrimitiveOrNull(): JsonPrimitive? = this as? JsonPrimitive
 }
 
 private data class QqBotIncomingAttachment(

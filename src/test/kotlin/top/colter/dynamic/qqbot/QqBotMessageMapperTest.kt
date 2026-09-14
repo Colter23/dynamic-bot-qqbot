@@ -159,7 +159,7 @@ class QqBotMessageMapperTest {
                         MessageContent.Mention(
                             fallbackText = "@某用户",
                             target = top.colter.dynamic.core.data.TargetAddress.of(
-                                platformId = "qq",
+                                platformId = "qq-official",
                                 kind = TargetKind.USER,
                                 externalId = "user-openid-1",
                             ),

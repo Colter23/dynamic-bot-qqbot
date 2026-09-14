@@ -124,6 +124,12 @@ internal class JavaNetQqBotWebSocketGateway(
         recall(QqBotOpenApiScope.Group(groupOpenid), accountId, messageId)
     }
 
+    override suspend fun groupInfo(accountId: String, groupOpenid: String): QqBotGroupInfo? =
+        withContext(Dispatchers.IO) {
+            requireAccount(accountId)
+            openApiClient.groupInfo(groupOpenid)
+        }
+
     private suspend fun sendText(
         scope: QqBotOpenApiScope,
         accountId: String,

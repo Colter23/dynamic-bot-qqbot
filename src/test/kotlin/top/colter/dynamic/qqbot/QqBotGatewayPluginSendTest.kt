@@ -33,13 +33,13 @@ class QqBotGatewayPluginSendTest {
         plugin.setPrivate("running", true)
 
         val result = plugin.sendMessage(
-            request = deliveryRequest(TargetAddress.of("qq", TargetKind.USER, "user-openid"), "hello"),
-            routeId = "qqbot:qq:app-id",
+            request = deliveryRequest(TargetAddress.of("qq-official", TargetKind.USER, "user-openid"), "hello"),
+            routeId = "qqbot:qq-official:app-id",
         )
 
         val sent = assertIs<MessageSendResult.Sent>(result)
         assertEquals("user-send-1", sent.sinkMessageId)
-        assertEquals("qqbot:qq:app-id", sent.sinkRouteId)
+        assertEquals("qqbot:qq-official:app-id", sent.sinkRouteId)
         assertEquals("app-id", sent.sinkAccountId)
         assertEquals("qqbot", sent.sinkTransportId)
         assertEquals(listOf("app-id:user:user-openid:hello"), gateway.sendCalls)
@@ -54,7 +54,7 @@ class QqBotGatewayPluginSendTest {
 
         val result = plugin.sendMessage(
             request = deliveryRequest(
-                target = TargetAddress.of("qq", TargetKind.GROUP, "group-openid"),
+                target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
                 batches = listOf(
                     MessageBatch(listOf(MessageContent.Text("先看图"))),
                     MessageBatch(
@@ -67,7 +67,7 @@ class QqBotGatewayPluginSendTest {
                     ),
                 ),
             ),
-            routeId = "qqbot:qq:app-id",
+            routeId = "qqbot:qq-official:app-id",
         )
 
         val sent = assertIs<MessageSendResult.Sent>(result)
@@ -91,7 +91,7 @@ class QqBotGatewayPluginSendTest {
 
         val result = plugin.sendMessage(
             request = deliveryRequest(
-                target = TargetAddress.of("qq", TargetKind.GROUP, "group-openid"),
+                target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
                 batches = listOf(
                     MessageBatch(
                         listOf(
@@ -108,7 +108,7 @@ class QqBotGatewayPluginSendTest {
                     MessageBatch(listOf(MessageContent.Text("2026年06月18日 14:12:00"))),
                 ),
             ),
-            routeId = "qqbot:qq:app-id",
+            routeId = "qqbot:qq-official:app-id",
         )
 
         val sent = assertIs<MessageSendResult.Sent>(result)
@@ -133,7 +133,7 @@ class QqBotGatewayPluginSendTest {
 
         val result = plugin.sendMessage(
             request = deliveryRequest(
-                target = TargetAddress.of("qq", TargetKind.USER, "user-openid"),
+                target = TargetAddress.of("qq-official", TargetKind.USER, "user-openid"),
                 batches = listOf(
                     MessageBatch(
                         listOf(
@@ -145,7 +145,7 @@ class QqBotGatewayPluginSendTest {
                     ),
                 ),
             ),
-            routeId = "qqbot:qq:app-id",
+            routeId = "qqbot:qq-official:app-id",
         )
 
         assertIs<MessageSendResult.Sent>(result)
@@ -163,7 +163,7 @@ class QqBotGatewayPluginSendTest {
 
         val result = plugin.sendMessage(
             request = deliveryRequest(
-                target = TargetAddress.of("qq", TargetKind.USER, "user-openid"),
+                target = TargetAddress.of("qq-official", TargetKind.USER, "user-openid"),
                 batches = listOf(
                     MessageBatch(
                         listOf(
@@ -175,7 +175,7 @@ class QqBotGatewayPluginSendTest {
                     ),
                 ),
             ),
-            routeId = "qqbot:qq:app-id",
+            routeId = "qqbot:qq-official:app-id",
         )
 
         assertIs<MessageSendResult.Sent>(result)
@@ -191,25 +191,25 @@ class QqBotGatewayPluginSendTest {
         plugin.setPrivate("running", true)
 
         val advice = plugin.adviseMediaDelivery(
-            MessageSinkMediaDeliveryAdviceRequest(routeId = "qqbot:qq:app-id"),
+            MessageSinkMediaDeliveryAdviceRequest(routeId = "qqbot:qq-official:app-id"),
         )
         val localProbe = plugin.probeMediaDelivery(
             MessageSinkMediaDeliveryProbeRequest(
-                routeId = "qqbot:qq:app-id",
+                routeId = "qqbot:qq-official:app-id",
                 method = MessageSinkMediaDeliveryMethod.LOCAL_FILE,
                 uri = image.toUri().toString(),
             ),
         )
         val missingProbe = plugin.probeMediaDelivery(
             MessageSinkMediaDeliveryProbeRequest(
-                routeId = "qqbot:qq:app-id",
+                routeId = "qqbot:qq-official:app-id",
                 method = MessageSinkMediaDeliveryMethod.LOCAL_FILE,
                 uri = "file:///qqbot/missing/image.png",
             ),
         )
         val signedUrlProbe = plugin.probeMediaDelivery(
             MessageSinkMediaDeliveryProbeRequest(
-                routeId = "qqbot:qq:app-id",
+                routeId = "qqbot:qq-official:app-id",
                 method = MessageSinkMediaDeliveryMethod.SIGNED_URL,
                 uri = "http://127.0.0.1:8080/media/outbound/a",
             ),
@@ -230,11 +230,11 @@ class QqBotGatewayPluginSendTest {
 
         val result = plugin.sendMessage(
             request = sendRequest(
-                target = TargetAddress.of("qq", TargetKind.GROUP, "group-openid"),
+                target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
                 batches = listOf(MessageBatch(listOf(MessageContent.Text("ok")))),
                 replyToMessageId = "trace-id",
             ),
-            routeId = "qqbot:qq:app-id",
+            routeId = "qqbot:qq-official:app-id",
         )
 
         val sent = assertIs<MessageSendResult.Sent>(result)
@@ -251,11 +251,11 @@ class QqBotGatewayPluginSendTest {
 
         val result = plugin.sendMessage(
             request = sendRequest(
-                target = TargetAddress.of("qq", TargetKind.GROUP, "group-openid"),
+                target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
                 batches = listOf(MessageBatch(listOf(MessageContent.Text("pong")))),
                 replyToMessageId = "group-msg-1",
             ),
-            routeId = "qqbot:qq:app-id",
+            routeId = "qqbot:qq-official:app-id",
         )
 
         assertIs<MessageSendResult.Sent>(result)
@@ -270,8 +270,8 @@ class QqBotGatewayPluginSendTest {
         plugin.setPrivate("running", true)
 
         val result = plugin.sendMessage(
-            request = deliveryRequest(TargetAddress.of("qq", TargetKind.USER, "user-openid"), "hello"),
-            routeId = "qqbot:qq:app-id",
+            request = deliveryRequest(TargetAddress.of("qq-official", TargetKind.USER, "user-openid"), "hello"),
+            routeId = "qqbot:qq-official:app-id",
         )
 
         val failed = assertIs<MessageSendResult.Failed>(result)
@@ -287,8 +287,8 @@ class QqBotGatewayPluginSendTest {
         plugin.setPrivate("running", true)
 
         val result = plugin.sendMessage(
-            request = deliveryRequest(TargetAddress.of("qq", TargetKind.GROUP, "group-openid"), "hello"),
-            routeId = "qqbot:qq:app-id",
+            request = deliveryRequest(TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"), "hello"),
+            routeId = "qqbot:qq-official:app-id",
         )
 
         val uncertain = assertIs<MessageSendResult.Uncertain>(result)
@@ -312,8 +312,8 @@ class QqBotGatewayPluginSendTest {
         plugin.setPrivate("running", true)
 
         val result = plugin.sendMessage(
-            request = deliveryRequest(TargetAddress.of("qq", TargetKind.GROUP, "group-openid"), "hello"),
-            routeId = "qqbot:qq:app-id",
+            request = deliveryRequest(TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"), "hello"),
+            routeId = "qqbot:qq-official:app-id",
         )
 
         val failed = assertIs<MessageSendResult.Failed>(result)
@@ -337,8 +337,8 @@ class QqBotGatewayPluginSendTest {
         plugin.setPrivate("running", true)
 
         val result = plugin.sendMessage(
-            request = deliveryRequest(TargetAddress.of("qq", TargetKind.USER, "user-openid"), "hello"),
-            routeId = "qqbot:qq:app-id",
+            request = deliveryRequest(TargetAddress.of("qq-official", TargetKind.USER, "user-openid"), "hello"),
+            routeId = "qqbot:qq-official:app-id",
         )
 
         assertIs<MessageSendResult.Uncertain>(result)
@@ -352,12 +352,12 @@ class QqBotGatewayPluginSendTest {
         plugin.setPrivate("running", true)
 
         val request = sendRequest(
-            target = TargetAddress.of("qq", TargetKind.GROUP, "group-openid"),
+            target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
             batches = listOf(MessageBatch(listOf(MessageContent.Text("回复")))),
             replyToMessageId = "group-msg-9",
         )
-        plugin.sendMessage(request, routeId = "qqbot:qq:app-id")
-        plugin.sendMessage(request, routeId = "qqbot:qq:app-id")
+        plugin.sendMessage(request, routeId = "qqbot:qq-official:app-id")
+        plugin.sendMessage(request, routeId = "qqbot:qq-official:app-id")
 
         assertEquals(listOf(1, 2), gateway.sentRequests.map { it.msgSeq })
         assertEquals(listOf("group-msg-9", "group-msg-9"), gateway.sentRequests.map { it.replyToMessageId })
@@ -372,10 +372,10 @@ class QqBotGatewayPluginSendTest {
 
         val result = plugin.recallMessage(
             request = MessageRecallRequest(
-                target = TargetAddress.of("qq", TargetKind.USER, "user-openid"),
+                target = TargetAddress.of("qq-official", TargetKind.USER, "user-openid"),
                 sinkMessageId = "user-send-1",
             ),
-            routeId = "qqbot:qq:app-id",
+            routeId = "qqbot:qq-official:app-id",
         )
 
         assertIs<MessageRecallResult.Recalled>(result)
@@ -391,10 +391,10 @@ class QqBotGatewayPluginSendTest {
 
         val result = plugin.recallMessage(
             request = MessageRecallRequest(
-                target = TargetAddress.of("qq", TargetKind.GROUP, "group-openid"),
+                target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
                 sinkMessageId = "group-send-1",
             ),
-            routeId = "qqbot:qq:app-id",
+            routeId = "qqbot:qq-official:app-id",
         )
 
         assertIs<MessageRecallResult.Recalled>(result)
@@ -410,10 +410,10 @@ class QqBotGatewayPluginSendTest {
 
         val result = plugin.recallMessage(
             request = MessageRecallRequest(
-                target = TargetAddress.of("qq", TargetKind.GROUP, "group-openid"),
+                target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
                 sinkMessageId = "   ",
             ),
-            routeId = "qqbot:qq:app-id",
+            routeId = "qqbot:qq-official:app-id",
         )
 
         val failed = assertIs<MessageRecallResult.Failed>(result)
@@ -430,10 +430,10 @@ class QqBotGatewayPluginSendTest {
 
         val result = plugin.recallMessage(
             request = MessageRecallRequest(
-                target = TargetAddress.of("qq", TargetKind.USER, "user-openid"),
+                target = TargetAddress.of("qq-official", TargetKind.USER, "user-openid"),
                 sinkMessageId = "user-send-1",
             ),
-            routeId = "qqbot:qq:app-id",
+            routeId = "qqbot:qq-official:app-id",
         )
 
         val failed = assertIs<MessageRecallResult.Failed>(result)

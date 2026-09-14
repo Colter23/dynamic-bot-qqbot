@@ -11,7 +11,7 @@ internal sealed interface QqBotTarget {
     companion object {
         fun fromAddress(address: TargetAddress): QqBotTarget {
             if (address.platformId != QQBOT_PLATFORM_ID) {
-                return Unsupported("目标平台不是 QQ：${address.platformId.value}")
+                return Unsupported("目标平台不是 QQ 官方机器人：${address.platformId.value}")
             }
             return when (address.kind) {
                 TargetKind.USER -> User(address.externalId)

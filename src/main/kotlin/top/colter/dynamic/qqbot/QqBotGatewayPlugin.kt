@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import top.colter.dynamic.core.config.ConfigApplyResult
 import top.colter.dynamic.core.config.ConfigurablePlugin
@@ -37,7 +38,14 @@ import top.colter.dynamic.core.plugin.PluginContext
 import top.colter.dynamic.core.tools.loggerFor
 
 private val logger = loggerFor<QqBotGatewayPlugin>()
-internal val QQBOT_PLATFORM_ID: PlatformId = PlatformId.of("qq")
+/**
+ * QQ 官方机器人独占的平台 ID。
+ *
+ * 刻意与 OneBot 插件的 `qq` 区分：两者的目标标识完全不通（官方是 openid，OneBot 是 QQ 号）。
+ * 若共用同一平台 ID，投递时出口插件选择只校验平台、不校验目标 ID 归属，两个插件的账号路线
+ * 会进入同一个候选池，导致先尝试不匹配的插件、失败后才回退，并存在误投风险。
+ */
+internal val QQBOT_PLATFORM_ID: PlatformId = PlatformId.of("qq-official")
 internal const val QQBOT_PLUGIN_ID: String = "qqbot-gateway"
 
 public class QqBotGatewayPlugin :
@@ -76,7 +84,7 @@ public class QqBotGatewayPlugin :
         config = context.configService.loadOrCreate(pluginId, QqBotConfigForm.migrations) { QqBotConfig() }
         QqBotConfigForm.validate(config)
         targetLedger = runCatching {
-            QqBotTargetLedger(dataStore = context.dataStore, pluginId = pluginId)
+            QqBotTargetLedger(dataStore = context.dataStore)
         }.onFailure { error ->
             logger.warn(error) { "QQ 官方机器人目标账本初始化失败，目标列表将从空开始积累" }
         }.getOrNull()
@@ -105,6 +113,7 @@ public class QqBotGatewayPlugin :
         gateway = nextGateway
         running = true
         logger.info { "QQ 官方机器人 WebSocket 网关已启动：appId=${config.appId}" }
+        backfillTargetInfo()
     }
 
     override suspend fun onStop() {
@@ -152,7 +161,7 @@ public class QqBotGatewayPlugin :
     ): MessageSendResult {
         if (!running) return MessageSendResult.failed("QQ 官方机器人插件未运行")
         if (!supportsTarget(request.target)) {
-            return MessageSendResult.failed("目标平台不是 QQ 或类型不受支持", retryable = false)
+            return MessageSendResult.failed("目标平台不是 QQ 官方机器人或类型不受支持", retryable = false)
         }
         val accountId = accountIdFromRoute(routeId)
             ?: return MessageSendResult.failed("QQ 官方机器人路线 ID 无效：$routeId", retryable = false)
@@ -351,20 +360,178 @@ public class QqBotGatewayPlugin :
 
     private fun recordTargetSighting(event: QqBotIncomingEvent) {
         val ledger = targetLedger ?: return
-        runCatching {
-            val sighting = QqBotIncomingMessageMapper.toTargetSighting(event) ?: return
-            val removed = when (event.type) {
-                QQBOT_GROUP_DEL_ROBOT, QQBOT_FRIEND_DEL -> true
-                else -> false
-            }
+        val sighting = runCatching { QqBotIncomingMessageMapper.toTargetSighting(event) }
+            .onFailure { error -> logger.warn(error) { "QQ 官方机器人目标解析失败：type=${event.type}" } }
+            .getOrNull()
+            ?: return
+        val removed = event.type == QQBOT_GROUP_DEL_ROBOT || event.type == QQBOT_FRIEND_DEL
+        val changed = runCatching {
             if (removed) {
-                ledger.markRemoved(sighting.kind, sighting.externalId, sighting.event)
+                ledger.markRemoved(sighting.kind, sighting.externalId)
             } else {
-                ledger.record(sighting.kind, sighting.externalId, sighting.event, sighting.timestampEpochSeconds)
+                ledger.record(sighting.kind, sighting.externalId)
             }
         }.onFailure { error ->
             logger.warn(error) { "QQ 官方机器人目标账本记录失败：type=${event.type}" }
+        }.getOrDefault(false)
+        if (changed) {
+            logger.info {
+                "QQ 官方机器人目标账本已${if (removed) "移除" else "新增"}：${sighting.kind}:${sighting.externalId}"
+            }
         }
+        if (!removed) {
+            requestTargetInfo(ledger, sighting.kind, sighting.externalId)
+        }
+    }
+
+    /**
+     * 目标缺少展示名时补全资料，让后台显示群名称而不是一串 OpenID。
+     *
+     * 官方只有群资料接口（且为白名单能力），好友/用户没有对应接口，因此只处理群目标。
+     * 是否真的发起请求由 [QqBotTargetLedger.tryBeginInfoRequest] 决定：已取到名称、已有请求
+     * 在途、或仍在失败冷却期时都会被挡掉，避免同一目标被并发重复请求。
+     */
+    private fun requestTargetInfo(
+        ledger: QqBotTargetLedger,
+        kind: TargetKind,
+        externalId: String,
+    ) {
+        if (!running) return
+        if (kind != TargetKind.GROUP) return
+        val accountId = config.appId.trim().takeIf { it.isNotBlank() } ?: return
+        val scope = incomingScope ?: return
+        scope.launch { fetchGroupInfo(ledger, accountId, externalId) }
+    }
+
+    /** 启动时补全历史遗留的、还没有名称的群目标（等网关就绪后串行执行）。 */
+    private fun backfillTargetInfo() {
+        val ledger = targetLedger ?: return
+        val scope = incomingScope ?: return
+        val pending = runCatching {
+            ledger.listCandidates(TargetKind.GROUP)
+                .map { it.address.externalId }
+                .filter { groupOpenid -> ledger.needsInfo(TargetKind.GROUP, groupOpenid) }
+        }.getOrDefault(emptyList())
+        if (pending.isEmpty()) return
+        scope.launch {
+            // 启动瞬间账号尚未 READY，直接请求会因"账号不可用"失败并误入冷却期
+            val accountId = awaitReadyAccountId() ?: run {
+                logger.warn {
+                    "QQ 官方机器人网关在 ${ACCOUNT_READY_TIMEOUT_MILLIS / 1000}s 内未就绪，" +
+                        "跳过本次群资料补全：count=${pending.size}"
+                }
+                return@launch
+            }
+            logger.info { "QQ 官方机器人开始补全群资料：count=${pending.size} account=$accountId" }
+            pending.forEachIndexed { index, groupOpenid ->
+                // 群多时避免启动瞬间连打一串请求
+                if (index > 0) delay(BACKFILL_REQUEST_INTERVAL_MILLIS)
+                fetchGroupInfo(ledger, accountId, groupOpenid)
+            }
+        }
+    }
+
+    private suspend fun awaitReadyAccountId(timeoutMillis: Long = ACCOUNT_READY_TIMEOUT_MILLIS): String? {
+        val deadline = System.currentTimeMillis() + timeoutMillis
+        while (System.currentTimeMillis() < deadline) {
+            val ready = runCatching {
+                gateway.availableAccounts().firstOrNull { it.state == MessageSinkRouteState.READY }
+            }.getOrNull()
+            if (ready != null) return ready.accountId
+            delay(ACCOUNT_READY_POLL_MILLIS)
+        }
+        return null
+    }
+
+    /**
+     * 拉取单个群的资料并登记结果。
+     *
+     * [accountId] 由调用方给出（启动补全用就绪账号、事件路径用配置的 AppID），避免
+     * "日志里的账号"与"实际请求的账号"不一致。
+     */
+    private suspend fun fetchGroupInfo(
+        ledger: QqBotTargetLedger,
+        accountId: String,
+        groupOpenid: String,
+    ) {
+        if (!ledger.tryBeginInfoRequest(TargetKind.GROUP, groupOpenid)) return
+        val nowEpochSeconds = System.currentTimeMillis() / 1000
+        val info = try {
+            gateway.groupInfo(accountId, groupOpenid)
+        } catch (error: CancellationException) {
+            // 插件停止：释放名额后原样抛出，不登记任何冷却
+            ledger.abandonInfoRequest(TargetKind.GROUP, groupOpenid)
+            throw error
+        } catch (error: Throwable) {
+            val cooldownSeconds = infoRetryCooldownSeconds(error)
+            ledger.recordInfo(
+                kind = TargetKind.GROUP,
+                externalId = groupOpenid,
+                name = null,
+                retryAfterEpochSeconds = nowEpochSeconds + cooldownSeconds,
+            )
+            logger.warn(error) {
+                "QQ 官方机器人群资料获取失败（${cooldownSeconds}s 后重试），展示名继续使用 OpenID：group=$groupOpenid"
+            }
+            return
+        }
+
+        val name = info?.name?.trim()?.takeIf { it.isNotBlank() }
+        when {
+            // 网关不支持资料查询：长期不再尝试
+            info == null -> {
+                ledger.recordInfo(
+                    kind = TargetKind.GROUP,
+                    externalId = groupOpenid,
+                    name = null,
+                    retryAfterEpochSeconds = nowEpochSeconds + INFO_RETRY_PERMANENT_SECONDS,
+                )
+                logger.debug { "QQ 官方机器人网关未提供群资料查询：group=$groupOpenid" }
+            }
+            // 接口成功但没给出名称：按取不到处理，日志不能谎报"已补全"
+            name == null -> {
+                ledger.recordInfo(
+                    kind = TargetKind.GROUP,
+                    externalId = groupOpenid,
+                    name = null,
+                    retryAfterEpochSeconds = nowEpochSeconds + INFO_RETRY_PERMANENT_SECONDS,
+                )
+                logger.warn {
+                    "QQ 官方机器人群信息未返回群名称，展示名继续使用 OpenID：" +
+                        "group=$groupOpenid members=${info.memberCount ?: "-"}"
+                }
+            }
+            else -> {
+                ledger.recordInfo(TargetKind.GROUP, groupOpenid, name)
+                logger.info {
+                    "QQ 官方机器人群资料已补全：name=$name members=${info.memberCount ?: "-"} group=$groupOpenid"
+                }
+            }
+        }
+    }
+
+    /**
+     * 资料拉取的失败冷却。
+     *
+     * 只有"接口无权限/目标不可用"这类语义明确的业务码才按长期冷却（如 `11253` 白名单接口无权限）；
+     * 频控（`40034100`、`504000~504999`）、HTTP 429/5xx 与非 OpenAPI 异常（网络/IO）都只是暂时性
+     * 失败，短暂退避后重试——否则一次限流就会让群名 24 小时不再补全。
+     */
+    private fun infoRetryCooldownSeconds(error: Throwable): Long {
+        return if (isTransientInfoFailure(error)) {
+            INFO_RETRY_TRANSIENT_SECONDS
+        } else {
+            INFO_RETRY_PERMANENT_SECONDS
+        }
+    }
+
+    private fun isTransientInfoFailure(error: Throwable): Boolean {
+        val api = error as? QqBotOpenApiException ?: return true
+        if (api.statusCode == HTTP_TOO_MANY_REQUESTS || api.statusCode >= 500) return true
+        val code = api.code?.trim().orEmpty()
+        if (code.isEmpty()) return true
+        if (code in INFO_RETRY_TRANSIENT_CODES) return true
+        return code.toIntOrNull()?.let { it in MESSAGE_RATE_LIMIT_CODE_RANGE } == true
     }
 
     private fun QqBotIncomingEvent.sourceEventId(messageId: String): String {
@@ -551,3 +718,23 @@ internal fun createQqBotGateway(config: QqBotConfig): QqBotGateway {
 
 /** 调试级日志中入站文本的截断长度，避免日志被超长消息刷屏。 */
 private const val MAX_LOG_TEXT_CHARS: Int = 200
+
+/** 启动补全群资料时等待网关就绪的上限与轮询间隔。 */
+private const val ACCOUNT_READY_TIMEOUT_MILLIS: Long = 60_000L
+private const val ACCOUNT_READY_POLL_MILLIS: Long = 1_000L
+
+/** 启动补全群资料时，相邻两次请求之间的间隔（群多时不至于启动瞬间连打一串请求）。 */
+private const val BACKFILL_REQUEST_INTERVAL_MILLIS: Long = 300L
+
+/** 群资料拉取失败后的重试冷却：语义明确的业务码失败（多半无权限）按长期，其余按短退避。 */
+private const val INFO_RETRY_PERMANENT_SECONDS: Long = 24L * 60 * 60
+private const val INFO_RETRY_TRANSIENT_SECONDS: Long = 10L * 60
+
+/** 官方错误码表：`504000~504999` 为消息频率相关错误。 */
+private val MESSAGE_RATE_LIMIT_CODE_RANGE: IntRange = 504_000..504_999
+
+/** 明确属于暂时性失败的频控业务码（`40034100` 主动消息发送超过频控限制）。 */
+private val INFO_RETRY_TRANSIENT_CODES: Set<String> = setOf("40034100")
+
+/** HTTP 429 频率限制。 */
+private const val HTTP_TOO_MANY_REQUESTS: Int = 429

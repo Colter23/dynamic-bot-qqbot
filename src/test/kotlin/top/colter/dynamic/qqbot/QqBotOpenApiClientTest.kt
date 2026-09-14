@@ -531,6 +531,43 @@ class QqBotOpenApiClientTest {
     }
 
     @Test
+    fun `群信息接口解析群名称与人数`() {
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
+            ),
+            getResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(
+                        200,
+                        """
+                            {
+                              "group_openid":"group-openid",
+                              "group_name":"测试群",
+                              "group_finger_memo":"",
+                              "group_member_num":5
+                            }
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        val info = client.groupInfo("group/open id")
+
+        assertEquals("group-openid", info.groupOpenid)
+        assertEquals("测试群", info.name)
+        assertEquals(5, info.memberCount)
+        val request = transport.gets.single()
+        assertEquals("https://api.bot.qq.com/v2/groups/group%2Fopen%20id/info", request.url)
+        assertEquals("QQBot token-a", request.headers.getValue("Authorization"))
+    }
+
+    @Test
     fun `单聊消息撤回提交官方 DELETE 请求`() {
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(

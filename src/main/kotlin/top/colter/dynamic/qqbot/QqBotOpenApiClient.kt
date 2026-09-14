@@ -10,13 +10,11 @@ import java.time.Duration
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
 /**
@@ -74,8 +72,8 @@ internal class QqBotOpenApiClient(
         ensureSuccess("获取 QQ 官方机器人访问令牌", response)
 
         val root = parseResponseObject("获取 QQ 官方机器人访问令牌", response.body)
-        val tokenValue = root["access_token"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-        val expiresInSeconds = root["expires_in"]?.jsonPrimitive?.longOrNull
+        val tokenValue = root["access_token"]?.asPrimitiveOrNull()?.contentOrNull?.trim().orEmpty()
+        val expiresInSeconds = root["expires_in"]?.asPrimitiveOrNull()?.longOrNull
             ?: throw QqBotOpenApiException(
                 action = "获取 QQ 官方机器人访问令牌",
                 statusCode = response.statusCode,
@@ -117,7 +115,7 @@ internal class QqBotOpenApiClient(
         ensureSuccess("获取 QQ 官方机器人 WebSocket 接入点", response)
 
         val root = parseResponseObject("获取 QQ 官方机器人 WebSocket 接入点", response.body)
-        val url = root["url"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        val url = root["url"]?.asPrimitiveOrNull()?.contentOrNull?.trim().orEmpty()
         if (url.isBlank()) {
             throw QqBotOpenApiException(
                 action = "获取 QQ 官方机器人 WebSocket 接入点",
@@ -129,7 +127,7 @@ internal class QqBotOpenApiClient(
 
         return QqBotGatewayEndpoint(
             url = url,
-            shards = root["shards"]?.jsonPrimitive?.intOrNull,
+            shards = root["shards"]?.asPrimitiveOrNull()?.intOrNull,
             sessionStartLimit = root["session_start_limit"]?.let(::parseSessionStartLimit),
         )
     }
@@ -168,6 +166,28 @@ internal class QqBotOpenApiClient(
         ensureSuccess("撤回 QQ 官方机器人消息", response)
     }
 
+    /**
+     * 获取群基本信息。
+     *
+     * 官方标注该接口为白名单能力，机器人无权限时返回业务码 `11253`。
+     * 官方**没有**对应的好友/用户资料接口，只有群可以补全名称。
+     */
+    fun groupInfo(groupOpenid: String): QqBotGroupInfo {
+        val action = "获取 QQ 官方机器人群信息"
+        val response = transport.get(
+            url = "$OPEN_API_BASE_URL/v2/groups/${groupOpenid.pathSegment()}/info",
+            headers = authorizedHeaders(),
+        )
+        ensureSuccess(action, response)
+
+        val root = parseResponseObject(action, response.body)
+        return QqBotGroupInfo(
+            groupOpenid = root["group_openid"]?.asPrimitiveOrNull()?.contentOrNull?.trim().orEmpty(),
+            name = root["group_name"]?.asPrimitiveOrNull()?.contentOrNull?.trim().orEmpty(),
+            memberCount = root["group_member_num"]?.asPrimitiveOrNull()?.intOrNull,
+        )
+    }
+
     /** 分片上传第一步：预上传，返回 `upload_id` 与各分片预签名 URL。 */
     fun prepareUpload(scope: QqBotOpenApiScope, request: QqBotUploadPrepareRequest): QqBotUploadTicket {
         val action = "准备 QQ 官方机器人分片上传"
@@ -188,7 +208,7 @@ internal class QqBotOpenApiClient(
         ensureSuccess(action, response)
 
         val root = parseResponseObject(action, response.body)
-        val uploadId = root["upload_id"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        val uploadId = root["upload_id"]?.asPrimitiveOrNull()?.contentOrNull?.trim().orEmpty()
         if (uploadId.isBlank()) {
             throw QqBotOpenApiException(
                 action = action,
@@ -197,17 +217,17 @@ internal class QqBotOpenApiClient(
                 body = response.body,
             )
         }
-        val defaultBlockSize = root["block_size"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+        val defaultBlockSize = root["block_size"]?.asPrimitiveOrNull()?.contentOrNull?.toLongOrNull()
             ?: DEFAULT_BLOCK_SIZE_BYTES
-        val parts = root["parts"]?.jsonArray?.mapNotNull { element ->
-            val item = element.jsonObject
-            val index = item["index"]?.jsonPrimitive?.intOrNull ?: return@mapNotNull null
-            val presignedUrl = item["presigned_url"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        val parts = root["parts"]?.asArrayOrNull()?.mapNotNull { element ->
+            val item = element.asObjectOrNull() ?: return@mapNotNull null
+            val index = item["index"]?.asPrimitiveOrNull()?.intOrNull ?: return@mapNotNull null
+            val presignedUrl = item["presigned_url"]?.asPrimitiveOrNull()?.contentOrNull?.trim().orEmpty()
             if (presignedUrl.isBlank()) return@mapNotNull null
             QqBotUploadPart(
                 index = index,
                 presignedUrl = presignedUrl,
-                blockSizeBytes = item["block_size"]?.jsonPrimitive?.contentOrNull?.toLongOrNull()
+                blockSizeBytes = item["block_size"]?.asPrimitiveOrNull()?.contentOrNull?.toLongOrNull()
                     ?: defaultBlockSize,
             )
         }.orEmpty()
@@ -220,15 +240,15 @@ internal class QqBotOpenApiClient(
             )
         }
 
-        val uploadConfig = root["upload_config"]?.jsonObject
+        val uploadConfig = root["upload_config"]?.asObjectOrNull()
         return QqBotUploadTicket(
             uploadId = uploadId,
             blockSizeBytes = defaultBlockSize,
             parts = parts.sortedBy { it.index },
-            concurrency = uploadConfig?.get("concurrency")?.jsonPrimitive?.intOrNull ?: DEFAULT_UPLOAD_CONCURRENCY,
-            retryTimeoutSeconds = uploadConfig?.get("retry_timeout")?.jsonPrimitive?.longOrNull
+            concurrency = uploadConfig?.get("concurrency")?.asPrimitiveOrNull()?.intOrNull ?: DEFAULT_UPLOAD_CONCURRENCY,
+            retryTimeoutSeconds = uploadConfig?.get("retry_timeout")?.asPrimitiveOrNull()?.longOrNull
                 ?: DEFAULT_UPLOAD_RETRY_TIMEOUT_SECONDS,
-            retryDelaySeconds = uploadConfig?.get("retry_delay")?.jsonPrimitive?.longOrNull
+            retryDelaySeconds = uploadConfig?.get("retry_delay")?.asPrimitiveOrNull()?.longOrNull
                 ?: DEFAULT_UPLOAD_RETRY_DELAY_SECONDS,
         )
     }
@@ -266,27 +286,29 @@ internal class QqBotOpenApiClient(
     }
 
     private fun parseSessionStartLimit(element: JsonElement): QqBotSessionStartLimit {
-        val root = element.jsonObject
+        val root = element.asObjectOrNull() ?: return QqBotSessionStartLimit()
         return QqBotSessionStartLimit(
-            total = root["total"]?.jsonPrimitive?.intOrNull,
-            remaining = root["remaining"]?.jsonPrimitive?.intOrNull,
-            resetAfterMillis = root["reset_after"]?.jsonPrimitive?.longOrNull,
-            maxConcurrency = root["max_concurrency"]?.jsonPrimitive?.intOrNull,
+            total = root["total"]?.asPrimitiveOrNull()?.intOrNull,
+            remaining = root["remaining"]?.asPrimitiveOrNull()?.intOrNull,
+            resetAfterMillis = root["reset_after"]?.asPrimitiveOrNull()?.longOrNull,
+            maxConcurrency = root["max_concurrency"]?.asPrimitiveOrNull()?.intOrNull,
         )
     }
 
     private fun ensureSuccess(action: String, response: QqBotHttpResponse) {
         if (response.statusCode in 200..299) return
-        val errorMessage = runCatching {
-            val root = json.parseToJsonElement(response.body).jsonObject
-            root["message"]?.jsonPrimitive?.contentOrNull
-                ?: root["msg"]?.jsonPrimitive?.contentOrNull
-                ?: root["error"]?.jsonPrimitive?.contentOrNull
+        // 错误响应体只解析一次；非 JSON 或根节点不是对象时退化为仅凭状态码报错
+        val errorBody = runCatching {
+            json.parseToJsonElement(response.body).asObjectOrNull()
         }.getOrNull()
-        val errorCode = runCatching {
-            val root = json.parseToJsonElement(response.body).jsonObject
-            (root["err_code"] ?: root["code"])?.jsonPrimitive?.contentOrNull
-        }.getOrNull()
+        val errorMessage = errorBody?.let { root ->
+            root["message"]?.asPrimitiveOrNull()?.contentOrNull
+                ?: root["msg"]?.asPrimitiveOrNull()?.contentOrNull
+                ?: root["error"]?.asPrimitiveOrNull()?.contentOrNull
+        }
+        val errorCode = errorBody?.let { root ->
+            (root["err_code"] ?: root["code"])?.asPrimitiveOrNull()?.contentOrNull
+        }
 
         throw QqBotOpenApiException(
             action = action,
@@ -297,8 +319,8 @@ internal class QqBotOpenApiClient(
         )
     }
 
-    private fun parseResponseObject(action: String, body: String) = runCatching {
-        json.parseToJsonElement(body).jsonObject
+    private fun parseResponseObject(action: String, body: String): JsonObject = runCatching {
+        json.parseToJsonElement(body).asObjectOrNull() ?: error("响应根节点不是 JSON 对象")
     }.getOrElse { error ->
         throw QqBotOpenApiException(
             action = action,
@@ -372,7 +394,7 @@ internal class QqBotOpenApiClient(
 
     private fun parseSendReceipt(action: String, response: QqBotHttpResponse): QqBotSendReceipt {
         val root = parseResponseObject(action, response.body)
-        val messageId = root["id"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        val messageId = root["id"]?.asPrimitiveOrNull()?.contentOrNull?.trim().orEmpty()
         if (messageId.isBlank()) {
             throw QqBotOpenApiException(
                 action = action,
@@ -389,7 +411,7 @@ internal class QqBotOpenApiClient(
 
     private fun parseMediaResource(action: String, response: QqBotHttpResponse): QqBotMediaResource {
         val root = parseResponseObject(action, response.body)
-        val fileInfo = root["file_info"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+        val fileInfo = root["file_info"]?.asPrimitiveOrNull()?.contentOrNull?.trim().orEmpty()
         if (fileInfo.isBlank()) {
             throw QqBotOpenApiException(
                 action = action,
@@ -400,8 +422,8 @@ internal class QqBotOpenApiClient(
         }
         return QqBotMediaResource(
             fileInfo = fileInfo,
-            fileUuid = root["file_uuid"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotBlank() },
-            ttlSeconds = root["ttl"]?.jsonPrimitive?.longOrNull,
+            fileUuid = root["file_uuid"]?.asPrimitiveOrNull()?.contentOrNull?.trim()?.takeIf { it.isNotBlank() },
+            ttlSeconds = root["ttl"]?.asPrimitiveOrNull()?.longOrNull,
             rawPayload = response.body,
         )
     }
@@ -467,6 +489,13 @@ internal data class QqBotMediaResource(
     val fileUuid: String? = null,
     val ttlSeconds: Long? = null,
     val rawPayload: String = "",
+)
+
+/** 群基本信息（`GET /v2/groups/{group_openid}/info`）。 */
+internal data class QqBotGroupInfo(
+    val groupOpenid: String,
+    val name: String,
+    val memberCount: Int? = null,
 )
 
 internal data class QqBotUploadPrepareRequest(

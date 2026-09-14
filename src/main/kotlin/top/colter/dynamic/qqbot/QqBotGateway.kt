@@ -37,6 +37,13 @@ internal interface QqBotGateway : AutoCloseable {
 
     suspend fun recallGroupMessage(accountId: String, groupOpenid: String, messageId: String)
 
+    /**
+     * 获取群基本信息。
+     *
+     * 官方只有群资料接口，没有好友/用户资料接口。默认返回 null 表示该网关不提供资料查询。
+     */
+    suspend fun groupInfo(accountId: String, groupOpenid: String): QqBotGroupInfo? = null
+
     override fun close()
 }
 

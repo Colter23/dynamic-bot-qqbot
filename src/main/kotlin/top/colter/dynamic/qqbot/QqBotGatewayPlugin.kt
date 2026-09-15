@@ -113,7 +113,7 @@ public class QqBotGatewayPlugin :
         gateway = nextGateway
         running = true
         logger.info { "QQ 官方机器人 WebSocket 网关已启动：appId=${config.appId}" }
-        backfillTargetInfo()
+        startStartupTasks()
     }
 
     override suspend fun onStop() {
@@ -403,25 +403,35 @@ public class QqBotGatewayPlugin :
         scope.launch { fetchGroupInfo(ledger, accountId, externalId) }
     }
 
-    /** 启动时补全历史遗留的、还没有名称的群目标（等网关就绪后串行执行）。 */
-    private fun backfillTargetInfo() {
-        val ledger = targetLedger ?: return
+    /**
+     * 启动后的收尾任务：等网关就绪后先预热平台账号资料，再补全历史遗留的未命名群。
+     *
+     * 预热是必要的：[QqBotGateway.availableAccounts] 内部会拉一次 `GET /users/@me`，
+     * 而它在发送路径（`isAccountReady`）与后台账号查询里都会被调用；不预热的话，
+     * "启动后第一次发送"和后台首次查询要各自承担一次网络往返。
+     */
+    private fun startStartupTasks() {
         val scope = incomingScope ?: return
-        val pending = runCatching {
-            ledger.listCandidates(TargetKind.GROUP)
-                .map { it.address.externalId }
-                .filter { groupOpenid -> ledger.needsInfo(TargetKind.GROUP, groupOpenid) }
-        }.getOrDefault(emptyList())
-        if (pending.isEmpty()) return
+        val ledger = targetLedger
+        val pending = ledger?.let { target ->
+            runCatching {
+                target.listCandidates(TargetKind.GROUP)
+                    .map { it.address.externalId }
+                    .filter { groupOpenid -> target.needsInfo(TargetKind.GROUP, groupOpenid) }
+            }.getOrDefault(emptyList())
+        }.orEmpty()
+
         scope.launch {
             // 启动瞬间账号尚未 READY，直接请求会因"账号不可用"失败并误入冷却期
             val accountId = awaitReadyAccountId() ?: run {
                 logger.warn {
                     "QQ 官方机器人网关在 ${ACCOUNT_READY_TIMEOUT_MILLIS / 1000}s 内未就绪，" +
-                        "跳过本次群资料补全：count=${pending.size}"
+                        "跳过平台账号预热与群资料补全（待补全群数=${pending.size}）"
                 }
                 return@launch
             }
+            warmUpPlatformAccount()
+            if (ledger == null || pending.isEmpty()) return@launch
             logger.info { "QQ 官方机器人开始补全群资料：count=${pending.size} account=$accountId" }
             pending.forEachIndexed { index, groupOpenid ->
                 // 群多时避免启动瞬间连打一串请求
@@ -429,6 +439,15 @@ public class QqBotGatewayPlugin :
                 fetchGroupInfo(ledger, accountId, groupOpenid)
             }
         }
+    }
+
+    /** 预热平台账号资料；失败已在网关内部兜住并记 WARN，这里只保证不中断启动。 */
+    private suspend fun warmUpPlatformAccount() {
+        runCatching { gateway.availableAccounts() }
+            .onFailure { error ->
+                if (error is CancellationException) throw error
+                logger.warn(error) { "QQ 官方机器人平台账号资料预热失败" }
+            }
     }
 
     private suspend fun awaitReadyAccountId(timeoutMillis: Long = ACCOUNT_READY_TIMEOUT_MILLIS): String? {
@@ -576,6 +595,7 @@ public class QqBotGatewayPlugin :
         targetPlatformId = QQBOT_PLATFORM_ID,
         accountId = accountId,
         accountName = name,
+        accountAvatar = avatar,
         enabled = true,
         state = state,
     )

@@ -222,6 +222,25 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
+    fun `消息出口路线带上机器人名称与头像`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway(
+            avatar = MediaRef(uri = "https://thirdqq.qlogo.cn/g?b=oidb&k=abc&s=0", kind = MediaKind.AVATAR),
+        )
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val route = plugin.listMessageSinkRoutes().single()
+
+        assertEquals("qqbot:qq-official:app-id", route.routeId)
+        assertEquals("app-id", route.accountId)
+        assertEquals("测试 Bot", route.accountName)
+        assertEquals("https://thirdqq.qlogo.cn/g?b=oidb&k=abc&s=0", route.accountAvatar?.uri)
+        assertEquals(QQBOT_PLATFORM_ID, route.targetPlatformId)
+        assertEquals(MessageSinkRouteState.READY, route.state)
+    }
+
+    @Test
     fun `发送命令结果到群聊并返回回执`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway()
@@ -486,6 +505,7 @@ class QqBotGatewayPluginSendTest {
 
     private class FakeGateway(
         private val state: MessageSinkRouteState = MessageSinkRouteState.READY,
+        private val avatar: MediaRef? = null,
     ) : QqBotGateway {
         val sendCalls: MutableList<String> = mutableListOf()
         val sentRequests: MutableList<QqBotSendRequest> = mutableListOf()
@@ -496,7 +516,9 @@ class QqBotGatewayPluginSendTest {
         }
 
         override suspend fun availableAccounts(): List<QqBotRuntimeAccount> {
-            return listOf(QqBotRuntimeAccount(accountId = "app-id", name = "测试 Bot", state = state))
+            return listOf(
+                QqBotRuntimeAccount(accountId = "app-id", name = "测试 Bot", state = state, avatar = avatar),
+            )
         }
 
         override suspend fun sendUserMessage(

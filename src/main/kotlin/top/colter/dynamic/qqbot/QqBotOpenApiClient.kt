@@ -188,6 +188,41 @@ internal class QqBotOpenApiClient(
         )
     }
 
+    /**
+     * 获取机器人自身资料（`GET /users/@me`）。
+     *
+     * 返回机器人名称与头像 URL，用于后台展示平台账号；官方限频 50 QPS，非白名单能力。
+     */
+    fun botInfo(): QqBotBotInfo {
+        val action = "获取 QQ 官方机器人资料"
+        val response = transport.get(
+            url = "$OPEN_API_BASE_URL/users/@me",
+            headers = authorizedHeaders(),
+        )
+        ensureSuccess(action, response)
+
+        val root = parseResponseObject(action, response.body)
+        return QqBotBotInfo(
+            name = root["username"]?.asPrimitiveOrNull()?.contentOrNull?.trim().orEmpty(),
+            avatar = root["avatar"]?.asPrimitiveOrNull()?.contentOrNull?.trim().orEmpty().toHttpsUrl(),
+        )
+    }
+
+    /**
+     * 把 `http://` 升级为 `https://`。
+     *
+     * 官方返回的头像地址是 `http://thirdqq.qlogo.cn/...`；后台若以 https 提供服务，
+     * http 图片会被浏览器按混合内容拦截（实测 qlogo 两种协议都能取到同一张图）。
+     */
+    private fun String.toHttpsUrl(): String {
+        val plainScheme = "http://"
+        return if (startsWith(plainScheme, ignoreCase = true)) {
+            "https://" + drop(plainScheme.length)
+        } else {
+            this
+        }
+    }
+
     /** 分片上传第一步：预上传，返回 `upload_id` 与各分片预签名 URL。 */
     fun prepareUpload(scope: QqBotOpenApiScope, request: QqBotUploadPrepareRequest): QqBotUploadTicket {
         val action = "准备 QQ 官方机器人分片上传"
@@ -496,6 +531,13 @@ internal data class QqBotGroupInfo(
     val groupOpenid: String,
     val name: String,
     val memberCount: Int? = null,
+)
+
+/** 机器人自身资料（`GET /users/@me`）。 */
+internal data class QqBotBotInfo(
+    val name: String,
+    /** 头像 URL（已归一到 https），官方返回 `thirdqq.qlogo.cn`。 */
+    val avatar: String = "",
 )
 
 internal data class QqBotUploadPrepareRequest(

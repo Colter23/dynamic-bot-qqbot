@@ -9,8 +9,12 @@ import java.util.concurrent.CompletionStage
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import top.colter.dynamic.core.data.MediaKind
+import top.colter.dynamic.core.data.MediaRef
 import top.colter.dynamic.core.plugin.MessageSinkRouteState
 import top.colter.dynamic.core.tools.loggerFor
 
@@ -87,6 +91,7 @@ internal class JavaNetQqBotWebSocketGateway(
     }
 
     override suspend fun availableAccounts(): List<QqBotRuntimeAccount> {
+        ensureBotProfile()
         return listOfNotNull(account)
     }
 
@@ -470,12 +475,65 @@ internal class JavaNetQqBotWebSocketGateway(
         }
     }
 
+    /**
+     * 机器人自身资料（`GET /users/@me`），首次成功拉取后缓存；用于后台展示真实名称与头像。
+     */
+    @Volatile
+    private var botProfile: QqBotBotInfo? = null
+
+    /**
+     * 拉取互斥标记。
+     *
+     * [availableAccounts] 会被后台账号查询与发送路径（`isAccountReady`）并发调用，
+     * 用原子 CAS 而不是普通布尔，避免两边同时通过检查、各发一次资料请求。
+     */
+    private val botProfileLoading: AtomicBoolean = AtomicBoolean(false)
+
+    /** 资料拉取失败后的重试时间；避免在发送热路径上反复打接口。 */
+    @Volatile
+    private var botProfileRetryAfterMillis: Long = 0L
+
+    /**
+     * 拉取机器人资料并缓存。
+     *
+     * 用"已缓存 / 失败冷却 / 正在拉取"三重短路：正常情况零开销，失败也不会反复请求。
+     * 拉取失败只记 WARN，保留默认展示名，不影响连接与收发。
+     */
+    private suspend fun ensureBotProfile() {
+        if (botProfile != null) return
+        if (System.currentTimeMillis() < botProfileRetryAfterMillis) return
+        val current = account ?: return
+        if (current.state != MessageSinkRouteState.READY) return
+        if (!botProfileLoading.compareAndSet(false, true)) return
+        try {
+            val info = withContext(Dispatchers.IO) { openApiClient.botInfo() }
+            botProfile = info
+            // 写回时重新读取当下的 state：拉取期间连接可能已断开（markUnavailable 会置为
+            // UNAVAILABLE），用几毫秒前读到的 current.state 覆盖回去会把状态改错
+            account?.let { latest -> account = initialAccount(latest.state) }
+            logger.info {
+                "QQ 官方机器人资料已加载：name=${info.name} avatar=${if (info.avatar.isBlank()) "无" else "有"}"
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            botProfileRetryAfterMillis = System.currentTimeMillis() + BOT_PROFILE_RETRY_MILLIS
+            logger.warn(error) { "QQ 官方机器人资料获取失败，后台展示名回退为默认值" }
+        } finally {
+            botProfileLoading.set(false)
+        }
+    }
+
     private fun initialAccount(state: MessageSinkRouteState): QqBotRuntimeAccount {
         val appId = config.appId.trim()
+        val profile = botProfile
         return QqBotRuntimeAccount(
             accountId = appId,
-            name = "QQ 官方机器人 $appId",
+            name = profile?.name?.takeIf { it.isNotBlank() } ?: "QQ 官方机器人 $appId",
             state = state,
+            avatar = profile?.avatar
+                ?.takeIf { it.isNotBlank() }
+                ?.let { uri -> MediaRef(uri = uri, kind = MediaKind.AVATAR) },
         )
     }
 
@@ -540,6 +598,9 @@ internal class JavaNetQqBotWebSocketGateway(
 }
 
 private const val DEFAULT_MEDIA_FILE_NAME: String = "media"
+
+/** 机器人资料（`GET /users/@me`）拉取失败后的重试冷却。 */
+private const val BOT_PROFILE_RETRY_MILLIS: Long = 10L * 60 * 1000
 
 internal interface QqBotWebSocketConnector {
     fun connect(url: String, listener: QqBotWebSocketListener): QqBotWebSocketSession

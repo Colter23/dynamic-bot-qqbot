@@ -568,6 +568,65 @@ class QqBotOpenApiClientTest {
     }
 
     @Test
+    fun `机器人资料接口解析名称并把头像归一到 https`() {
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
+            ),
+            getResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(
+                        200,
+                        """
+                            {
+                              "id":"2664901145947526480",
+                              "username":"PuniBot-测试中",
+                              "avatar":"http://thirdqq.qlogo.cn/g?b=oidb&k=abc&s=0",
+                              "bot":true,
+                              "union_openid":"D094392883510D51560FE12CBEAC894E"
+                            }
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        val info = client.botInfo()
+
+        assertEquals("PuniBot-测试中", info.name)
+        // 官方返回 http，统一升级为 https（否则后台走 https 时会被混合内容拦截）
+        assertEquals("https://thirdqq.qlogo.cn/g?b=oidb&k=abc&s=0", info.avatar)
+        val request = transport.gets.single()
+        assertEquals("https://api.bot.qq.com/users/@me", request.url)
+        assertEquals("QQBot token-a", request.headers.getValue("Authorization"))
+    }
+
+    @Test
+    fun `机器人资料缺少头像时为空串`() {
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
+            ),
+            getResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"id":"1","username":"无名 Bot"}""")),
+            ),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        val info = client.botInfo()
+
+        assertEquals("无名 Bot", info.name)
+        assertEquals("", info.avatar)
+    }
+
+    @Test
     fun `单聊消息撤回提交官方 DELETE 请求`() {
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(

@@ -10,6 +10,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import top.colter.dynamic.core.plugin.MessageSinkRouteState
 
 class JavaNetQqBotWebSocketGatewayTest {
@@ -446,6 +447,82 @@ class JavaNetQqBotWebSocketGatewayTest {
 
         assertEquals("https://api.bot.qq.com/v2/users/user-openid/messages/user-send-1", transport.deletes[0].url)
         assertEquals("https://api.bot.qq.com/v2/groups/group-openid/messages/group-send-1", transport.deletes[1].url)
+    }
+
+    @Test
+    fun `就绪后拉取机器人资料并在账号上带出名称与头像`() = runTest {
+        val connector = FakeQqBotWebSocketConnector()
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
+            ),
+            getResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(200, """{"url":"wss://api.bot.qq.com/websocket","shards":1}"""),
+                    QqBotHttpResponse(
+                        200,
+                        """
+                            {
+                              "id":"2664901145947526480",
+                              "username":"PuniBot-测试中",
+                              "avatar":"https://thirdqq.qlogo.cn/g?b=oidb&k=abc&s=0",
+                              "bot":true
+                            }
+                        """.trimIndent(),
+                    ),
+                ),
+            ),
+        )
+        val gateway = testGateway(connector = connector, transport = transport)
+
+        gateway.connect { }
+        connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        connector.listener.onText("""{"op":0,"s":88,"t":"READY","d":{"session_id":"session-a"}}""")
+
+        val account = gateway.availableAccounts().single()
+
+        assertEquals("PuniBot-测试中", account.name)
+        assertEquals("https://thirdqq.qlogo.cn/g?b=oidb&k=abc&s=0", account.avatar?.uri)
+        assertEquals(MessageSinkRouteState.READY, account.state)
+        // 接入点 + 机器人资料各一次
+        assertEquals(2, transport.gets.size)
+        assertEquals("https://api.bot.qq.com/users/@me", transport.gets.last().url)
+
+        // 资料已缓存：后续调用不再请求
+        assertEquals("PuniBot-测试中", gateway.availableAccounts().single().name)
+        assertEquals(2, transport.gets.size)
+    }
+
+    @Test
+    fun `机器人资料拉取失败时回退默认展示名且进入冷却`() = runTest {
+        val connector = FakeQqBotWebSocketConnector()
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
+            ),
+            getResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(200, """{"url":"wss://api.bot.qq.com/websocket","shards":1}"""),
+                    QqBotHttpResponse(500, """{"message":"boom"}"""),
+                ),
+            ),
+        )
+        val gateway = testGateway(connector = connector, transport = transport)
+
+        gateway.connect { }
+        connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        connector.listener.onText("""{"op":0,"s":88,"t":"READY","d":{"session_id":"session-a"}}""")
+
+        val account = gateway.availableAccounts().single()
+
+        // 回退默认展示名，且连接状态不受资料拉取失败影响
+        assertEquals("QQ 官方机器人 app-id", account.name)
+        assertNull(account.avatar)
+        assertEquals(MessageSinkRouteState.READY, account.state)
+
+        // 冷却期内不再请求（响应队列已耗尽，若仍发起请求 gets 会多出一条）
+        assertEquals("QQ 官方机器人 app-id", gateway.availableAccounts().single().name)
+        assertEquals(2, transport.gets.size)
     }
 
     private fun testGateway(

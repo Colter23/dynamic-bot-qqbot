@@ -1,5 +1,6 @@
 package top.colter.dynamic.qqbot
 
+import top.colter.dynamic.core.data.MediaRef
 import top.colter.dynamic.core.plugin.MessageSinkRouteState
 
 internal interface QqBotGateway : AutoCloseable {
@@ -51,6 +52,8 @@ internal data class QqBotRuntimeAccount(
     val accountId: String,
     val name: String = accountId,
     val state: MessageSinkRouteState = MessageSinkRouteState.READY,
+    /** 机器人头像，取自 `GET /users/@me`；拉取失败时为空。 */
+    val avatar: MediaRef? = null,
 )
 
 internal data class QqBotIncomingEvent(

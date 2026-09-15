@@ -75,11 +75,11 @@ QQ 官方机器人插件，用于通过 QQ 官方 API v2 接入 dynamic-bot。
 enabled: true
 appId: "你的 AppID"
 appSecret: "你的 AppSecret"
-intents:
-  - GROUP_AND_C2C_EVENT
 reconnect: true
 autoPublishIncoming: true
 ```
+
+事件订阅（`intents`）**不是配置项**：订阅类别固定为 `GROUP_AND_C2C_EVENT`（`1<<25`），已覆盖插件处理的全部群聊/单聊事件。官方规定"鉴权时传递无权限的 `intents` 会让 WebSocket 报错并直接关闭连接"，而其余位（`INTERACTION`、`MESSAGE_AUDIT`、频道/论坛/语音等）插件均未实现，开放该配置只会让用户踩空并连带搞坏连接。
 
 `autoPublishIncoming` 开启后，插件只发布标准入站消息；命令前缀匹配、群聊开头 at 当前 Bot 的规范化、链接识别和普通消息插件过滤都由主项目管线完成。平台原始消息 ID 会作为回复目标传入命令结果发送链路，便于 QQ 官方接口按原消息回复。
 

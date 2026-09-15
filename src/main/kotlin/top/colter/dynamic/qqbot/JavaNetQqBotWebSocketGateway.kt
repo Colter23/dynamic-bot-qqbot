@@ -421,10 +421,10 @@ internal class JavaNetQqBotWebSocketGateway(
     private fun sendIdentify() {
         val payload = QqBotWebSocketProtocol.identifyPayload(
             accessToken = accessToken,
-            intentMask = config.enabledIntentMask(),
+            intentMask = QQBOT_INTENT_MASK,
         )
         sendGatewayText(payload)
-        logger.info { "QQ 官方机器人 Identify 已发送：intents=${config.enabledIntentMask()}" }
+        logger.info { "QQ 官方机器人 Identify 已发送：intents=$QQBOT_INTENT_MASK" }
     }
 
     private fun sendResumeOrIdentify() {

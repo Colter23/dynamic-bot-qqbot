@@ -30,17 +30,20 @@ class QqBotConfigFormTest {
     }
 
     @Test
-    fun `事件订阅不能为空白`() {
-        assertFailsWith<IllegalArgumentException> {
-            QqBotConfigForm.validate(QqBotConfig(intents = listOf("   ")))
-        }
-    }
+    fun `迁移会移除已废弃的事件订阅配置`() {
+        val document = FakeMutableConfigDocument(
+            mutableMapOf(
+                "enabled" to true,
+                "appId" to "123456",
+                "appSecret" to "secret",
+                "intents" to listOf("GROUP_AND_C2C_EVENT", "INTERACTION"),
+            ),
+        )
 
-    @Test
-    fun `未知事件订阅会被拒绝`() {
-        assertFailsWith<IllegalArgumentException> {
-            QqBotConfigForm.validate(QqBotConfig(intents = listOf("NOT_AN_INTENT")))
-        }
+        QqBotConfigForm.migrations.forEach { migration -> migration.apply(document) }
+
+        // 残留旧键会让配置加载失败（开启了 FAIL_ON_UNKNOWN_PROPERTIES）
+        assertEquals(setOf("enabled", "appId", "appSecret"), document.keys())
     }
 
     @Test

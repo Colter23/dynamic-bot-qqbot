@@ -3,5 +3,5 @@ name: QQ 官方机器人插件
 version: 0.0.1
 mainClass: top.colter.dynamic.qqbot.QqBotGatewayPlugin
 apiVersion: 3.0.0
-description: 通过 QQ 官方 API v2 WebSocket 与 OpenAPI 接入单聊和群聊消息。
+description: QQ 官方机器人消息收发。
 author: dynamic-bot

@@ -9,33 +9,15 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 
 class QqBotWebSocketProtocolTest {
     @Test
-    fun `事件订阅掩码符合官方位定义`() {
-        assertEquals(1 shl 25, QqBotConfig().enabledIntentMask())
-        assertEquals(
-            (1 shl 25) or (1 shl 26),
-            QqBotConfig(
-                intents = listOf(
-                    QqBotIntent.GROUP_AND_C2C_EVENT.name,
-                    QqBotIntent.INTERACTION.name,
-                    QqBotIntent.GROUP_AND_C2C_EVENT.name,
-                ),
-            ).enabledIntentMask(),
-        )
-        assertEquals(
-            (1 shl 25) or (1 shl 27),
-            QqBotConfig(
-                intents = listOf(
-                    QqBotIntent.GROUP_AND_C2C_EVENT.name,
-                    QqBotIntent.MESSAGE_AUDIT.name,
-                ),
-            ).enabledIntentMask(),
-        )
+    fun `事件订阅掩码固定为 GROUP_AND_C2C_EVENT`() {
+        // 官方位定义：GROUP_AND_C2C_EVENT = 1<<25，已覆盖插件处理的全部群聊/单聊事件。
+        // 其余位未实现且无权限时会导致 WebSocket 直接断开，故不做成配置项。
+        assertEquals(1 shl 25, QQBOT_INTENT_MASK)
     }
 
     @Test
@@ -133,12 +115,5 @@ class QqBotWebSocketProtocolTest {
     @Test
     fun `非 Dispatch 负载在入站事件转换时被忽略`() {
         assertNull(QqBotWebSocketProtocol.incomingEventOrNull("""{"op":11,"d":null}"""))
-    }
-
-    @Test
-    fun `无效事件订阅在配置校验时被拒绝`() {
-        assertFailsWith<IllegalArgumentException> {
-            QqBotConfigForm.validate(QqBotConfig(intents = listOf("GUILD_MESSAGES")))
-        }
     }
 }

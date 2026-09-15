@@ -67,7 +67,7 @@ public class QqBotGatewayPlugin :
     override val configId: String
         get() = pluginId
     override val configName: String = "QQ 官方机器人"
-    override val configDescription: String = "QQ 官方 API v2 WebSocket 与 OpenAPI 接入配置。"
+    override val configDescription: String = "QQ 官方机器人消息收发配置。"
     override val configClass = QqBotConfig::class
     override val configFormSpec = QqBotConfigForm.spec
 

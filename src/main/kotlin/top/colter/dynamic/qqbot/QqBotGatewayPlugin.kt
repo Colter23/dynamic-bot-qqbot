@@ -29,6 +29,7 @@ import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryAdviceRequest
 import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryAdvisor
 import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryConfidence
 import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryMethod
+import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryModel
 import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryProbeRequest
 import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryProbeResult
 import top.colter.dynamic.core.plugin.MessageSinkRoute
@@ -76,6 +77,14 @@ public class QqBotGatewayPlugin :
     override val supportedMessageFeatures: Set<MessageSinkFeature> = emptySet()
     override val supportedTargetPlatforms: Set<PlatformId> = setOf(QQBOT_PLATFORM_ID)
     override val supportedTargetKinds: Set<TargetKind> = setOf(TargetKind.GROUP, TargetKind.USER)
+
+    /**
+     * 本地图片/视频由插件自己分片上传给 QQ，不需要主程序改写成签名链接或客户端可读路径。
+     *
+     * 主程序的媒体交付 profile（如指向内网地址的签名链接）对 QQ 官方是无效的——腾讯服务器
+     * 取不到内网地址，会以"富媒体文件下载失败"告终。
+     */
+    override val mediaDeliveryModel: MessageSinkMediaDeliveryModel = MessageSinkMediaDeliveryModel.SELF_MANAGED
 
     override suspend fun onLoad(context: PluginContext) {
         pluginId = context.pluginId

@@ -20,6 +20,7 @@ import top.colter.dynamic.core.plugin.MessageSendResult
 import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryAdviceRequest
 import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryConfidence
 import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryMethod
+import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryModel
 import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryProbeRequest
 import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryProbeStatus
 import top.colter.dynamic.core.plugin.MessageSinkRouteState
@@ -219,6 +220,15 @@ class QqBotGatewayPluginSendTest {
         assertEquals(MessageSinkMediaDeliveryProbeStatus.AVAILABLE, localProbe.status)
         assertEquals(MessageSinkMediaDeliveryProbeStatus.UNAVAILABLE, missingProbe.status)
         assertEquals(MessageSinkMediaDeliveryProbeStatus.UNKNOWN, signedUrlProbe.status)
+    }
+
+    @Test
+    fun `插件声明自管媒体交付`() {
+        // 本地图片由插件自己分片上传给 QQ，主程序不应改写成签名链接（内网地址腾讯取不到）
+        assertEquals(
+            MessageSinkMediaDeliveryModel.SELF_MANAGED,
+            QqBotGatewayPlugin().mediaDeliveryModel,
+        )
     }
 
     @Test

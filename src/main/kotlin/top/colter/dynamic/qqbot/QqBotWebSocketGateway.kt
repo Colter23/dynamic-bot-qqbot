@@ -18,13 +18,13 @@ import top.colter.dynamic.core.data.MediaRef
 import top.colter.dynamic.core.plugin.MessageSinkRouteState
 import top.colter.dynamic.core.tools.loggerFor
 
-private val logger = loggerFor<JavaNetQqBotWebSocketGateway>()
+private val logger = loggerFor<QqBotWebSocketGateway>()
 
-internal class JavaNetQqBotWebSocketGateway(
+internal class QqBotWebSocketGateway(
     private val config: QqBotConfig,
     private val openApiClient: QqBotOpenApiClient = QqBotOpenApiClient(config),
     private val mediaUploader: QqBotMediaUploader = QqBotMediaUploader(openApiClient),
-    private val connector: QqBotWebSocketConnector = JavaNetQqBotWebSocketConnector(),
+    private val connector: QqBotWebSocketConnector = QqBotJdkWebSocketConnector(),
     private val heartbeatScheduler: QqBotHeartbeatScheduler = ExecutorQqBotHeartbeatScheduler(),
     private val reconnectScheduler: QqBotReconnectScheduler = ExecutorQqBotReconnectScheduler(),
 ) : QqBotGateway {
@@ -214,14 +214,25 @@ internal class JavaNetQqBotWebSocketGateway(
             current
         }
         session?.close(1000, "插件停止")
-        markUnavailable("QQ 官方机器人 WebSocket 已关闭")
+        markUnavailable()
     }
 
     private fun openConnection(): Long {
         val endpoint = openApiClient.gatewayBotEndpoint()
+        // 官方限制：每个机器人创建的连接数不能超过 session_start_limit.remaining，
+        // 用尽后继续重试只会白刷日志，因此按终态处理。
+        val sessionLimit = endpoint.sessionStartLimit
+        val remaining = sessionLimit?.remaining
+        if (remaining != null && remaining <= 0) {
+            markUnavailable()
+            throw QqBotConnectionQuotaExhaustedException(
+                "QQ 官方机器人连接配额已用尽（remaining=$remaining，" +
+                    "resetAfter=${sessionLimit.resetAfterMillis ?: "-"}ms），已停止重连，请等待配额重置",
+            )
+        }
         accessToken = openApiClient.accessToken().value
         val generation = nextConnectionGeneration()
-        logger.info {
+        logger.debug {
             "正在连接 QQ 官方机器人 WebSocket：appId=${config.appId} url=${endpoint.url} shards=${endpoint.shards ?: "-"}"
         }
         val session = connector.connect(
@@ -264,7 +275,20 @@ internal class JavaNetQqBotWebSocketGateway(
         }
     }
 
-    private fun scheduleReconnect(reason: String, closeCurrentSession: Boolean) {
+    /**
+     * 安排重连，并作为**唯一的重连日志出口**。
+     *
+     * 原则是"正常静默、异常出声"：
+     * - [expected]（服务端要求重连 op 7、连接过期 4009）属正常流程，记 DEBUG——成功时
+     *   整个周期只剩 `handleControlDispatch` 里那一条 INFO，失败时下面的 WARN 仍会出来；
+     * - 其余按异常记 WARN，带 [cause] 时一并输出堆栈。
+     */
+    private fun scheduleReconnect(
+        reason: String,
+        closeCurrentSession: Boolean,
+        expected: Boolean = false,
+        cause: Throwable? = null,
+    ) {
         if (closing || !config.reconnect) return
 
         val session = if (closeCurrentSession) invalidateCurrentConnection() else null
@@ -276,7 +300,12 @@ internal class JavaNetQqBotWebSocketGateway(
             reconnectAttempts += 1
             reconnectDelayMillis(reconnectAttempts)
         }
-        logger.warn { "$reason；${delayMillis}ms 后重连" }
+        val message = "$reason；${delayMillis}ms 后重连"
+        when {
+            expected -> logger.debug { message }
+            cause != null -> logger.warn(cause) { message }
+            else -> logger.warn { message }
+        }
         reconnectTask = reconnectScheduler.schedule(delayMillis) {
             runReconnectAttempt()
         }
@@ -307,8 +336,13 @@ internal class JavaNetQqBotWebSocketGateway(
                 reconnectTask = null
                 reconnecting = false
             }
-            markUnavailable(error.message?.takeIf { it.isNotBlank() } ?: "QQ 官方机器人重连失败")
-            scheduleReconnect("QQ 官方机器人重连失败", closeCurrentSession = false)
+            markUnavailable()
+            // 连接配额用尽是终态，重试只会白刷日志，交给调用点停止重连
+            if (error is QqBotConnectionQuotaExhaustedException) {
+                logger.error { error.message.orEmpty() }
+                return@onFailure
+            }
+            scheduleReconnect("QQ 官方机器人重连失败", closeCurrentSession = false, cause = error)
         }
     }
 
@@ -345,7 +379,7 @@ internal class JavaNetQqBotWebSocketGateway(
 
         startHeartbeat(hello.heartbeatIntervalMillis)
         sendResumeOrIdentify()
-        logger.info { "QQ 官方机器人 WebSocket Hello 包已处理：heartbeat=${hello.heartbeatIntervalMillis}ms" }
+        logger.debug { "QQ 官方机器人 WebSocket Hello 包已处理：heartbeat=${hello.heartbeatIntervalMillis}ms" }
     }
 
     private fun handleDispatch(payload: String) {
@@ -372,7 +406,10 @@ internal class JavaNetQqBotWebSocketGateway(
             }
             QQBOT_RESUMED_EVENT -> {
                 markReady()
-                logger.info { "QQ 官方机器人 WebSocket 会话已恢复：sessionId=${sessionId.orEmpty()}" }
+                // 正常重连周期里唯一的一条 INFO：带上 seq 便于确认事件不会丢
+                logger.info {
+                    "QQ 官方机器人 WebSocket 会话已恢复：sessionId=${sessionId.orEmpty()} seq=${dispatch.sequence ?: "-"}"
+                }
                 true
             }
             else -> false
@@ -390,16 +427,46 @@ internal class JavaNetQqBotWebSocketGateway(
         logger.info { "QQ 官方机器人 WebSocket 会话已就绪：sessionId=${ready.sessionId}" }
     }
 
+    /** 服务端通过 op 7 要求重连：属正常流程，保留会话走 RESUME。 */
     private fun handleReconnectRequest() {
-        markUnavailable("QQ 官方机器人网关要求重连")
-        scheduleReconnect("QQ 官方机器人网关要求重连", closeCurrentSession = true)
+        markUnavailable()
+        scheduleReconnect("QQ 官方机器人网关要求重连", closeCurrentSession = true, expected = true)
     }
 
     private fun handleInvalidSession() {
         sessionId = null
         latestSequence = null
-        markUnavailable("QQ 官方机器人会话无效")
+        markUnavailable()
         scheduleReconnect("QQ 官方机器人会话无效", closeCurrentSession = true)
+    }
+
+    /**
+     * 按官方 WebSocket 错误码表处置关闭事件。
+     *
+     * 此前不看关闭码，导致两类问题：`4006`/`4007`（会话已失效，官方要求 identify）会继续
+     * RESUME 而反复被拒；`4013`/`4014`/`4914`/`4915` 等官方明确"不可重试"的终态错误会无限
+     * 重连，既刷日志又消耗连接配额。
+     */
+    private fun handleCloseCode(statusCode: Int, reason: String) {
+        val label = "QQ 官方机器人 WebSocket 已关闭：code=$statusCode reason=$reason"
+        when (closeActionOf(statusCode)) {
+            QqBotCloseAction.TERMINAL -> {
+                markUnavailable()
+                // 插件没有手动重连入口，终态后只能靠重启，日志里写清恢复途径
+                logger.error { "$label；该错误重试无意义，已停止重连，修复后需重启插件${terminalHint(statusCode)}" }
+            }
+            QqBotCloseAction.REIDENTIFY -> {
+                sessionId = null
+                latestSequence = null
+                markUnavailable()
+                scheduleReconnect("$label；会话已失效，将重新鉴权", closeCurrentSession = false)
+            }
+            QqBotCloseAction.RESUME -> {
+                markUnavailable()
+                // 4009「连接过期，请重连并执行 resume」是常态，属正常流程
+                scheduleReconnect(label, closeCurrentSession = false, expected = statusCode == QQBOT_CLOSE_CONNECTION_EXPIRED)
+            }
+        }
     }
 
     private fun startHeartbeat(intervalMillis: Long) {
@@ -437,7 +504,7 @@ internal class JavaNetQqBotWebSocketGateway(
                 sequence = sequence,
             )
             sendGatewayText(payload)
-            logger.info { "QQ 官方机器人正在恢复 WebSocket 会话：sessionId=$currentSessionId seq=$sequence" }
+            logger.debug { "QQ 官方机器人正在恢复 WebSocket 会话：sessionId=$currentSessionId seq=$sequence" }
             return
         }
 
@@ -467,12 +534,15 @@ internal class JavaNetQqBotWebSocketGateway(
         account = initialAccount(MessageSinkRouteState.READY)
     }
 
-    private fun markUnavailable(reason: String) {
+    /**
+     * 标记出口不可用。
+     *
+     * 只改状态、**不记日志**：所有调用点后面都紧跟 [scheduleReconnect]，由它按"正常/异常"
+     * 决定级别并输出唯一一条日志，避免同一句话被打两遍。
+     */
+    private fun markUnavailable() {
         if (account == null) return
         account = initialAccount(MessageSinkRouteState.UNAVAILABLE)
-        if (!closing) {
-            logger.warn { reason }
-        }
     }
 
     /**
@@ -573,7 +643,7 @@ internal class JavaNetQqBotWebSocketGateway(
     ) : QqBotWebSocketListener {
         override fun onOpen() {
             if (!isCurrentConnection(generation)) return
-            logger.info { "QQ 官方机器人 WebSocket 已打开：appId=${config.appId}" }
+            logger.debug { "QQ 官方机器人 WebSocket 已打开：appId=${config.appId}" }
         }
 
         override fun onText(payload: String) {
@@ -584,15 +654,13 @@ internal class JavaNetQqBotWebSocketGateway(
         override fun onClosed(statusCode: Int, reason: String) {
             if (!isCurrentConnection(generation)) return
             clearTransport(generation)
-            markUnavailable("QQ 官方机器人 WebSocket 已关闭：code=$statusCode reason=$reason")
-            scheduleReconnect("QQ 官方机器人 WebSocket 已关闭：code=$statusCode reason=$reason", closeCurrentSession = false)
+            handleCloseCode(statusCode, reason)
         }
 
         override fun onError(error: Throwable) {
             if (!isCurrentConnection(generation)) return
-            markUnavailable(error.message?.takeIf { it.isNotBlank() } ?: "QQ 官方机器人 WebSocket 出错")
-            logger.warn(error) { "QQ 官方机器人 WebSocket 出错" }
-            scheduleReconnect("QQ 官方机器人 WebSocket 出错", closeCurrentSession = true)
+            markUnavailable()
+            scheduleReconnect("QQ 官方机器人 WebSocket 出错", closeCurrentSession = true, cause = error)
         }
     }
 }
@@ -601,6 +669,53 @@ private const val DEFAULT_MEDIA_FILE_NAME: String = "media"
 
 /** 机器人资料（`GET /users/@me`）拉取失败后的重试冷却。 */
 private const val BOT_PROFILE_RETRY_MILLIS: Long = 10L * 60 * 1000
+
+/** 官方关闭码：连接过期，需重连并 RESUME。属常态，按正常流程记录。 */
+private const val QQBOT_CLOSE_CONNECTION_EXPIRED: Int = 4009
+
+/** 关闭码处置。 */
+internal enum class QqBotCloseAction {
+    /** 保留会话重连（可 RESUME）。 */
+    RESUME,
+
+    /** 会话已失效，需清除后重新 IDENTIFY。 */
+    REIDENTIFY,
+
+    /** 终态：官方明确不可重试，停止重连。 */
+    TERMINAL,
+}
+
+/**
+ * 依据官方 WebSocket 错误码表判定关闭码处置。
+ *
+ * 可 RESUME 的码保留会话；`4006`/`4007` 官方要求重新 IDENTIFY；其余为官方标注"不可重试"的终态。
+ */
+internal fun closeActionOf(statusCode: Int): QqBotCloseAction {
+    return when (statusCode) {
+        // 无效 session id / seq 错误：无法继续 resume，官方要求 identify
+        4006, 4007 -> QqBotCloseAction.REIDENTIFY
+        // 无效 opcode / payload / shard / version / intent / intent 无权限 / 已下架 / 已封禁
+        4001, 4002, 4010, 4011, 4012, 4013, 4014, 4914, 4915 -> QqBotCloseAction.TERMINAL
+        // 4008 发送过快、4009 连接过期、4900~4913 内部错误，以及未知码：保守按可重连处理
+        else -> QqBotCloseAction.RESUME
+    }
+}
+
+/** 终态关闭码的排查提示。 */
+private fun terminalHint(statusCode: Int): String {
+    return when (statusCode) {
+        4013 -> "；intent 无效，请核对 QQBOT_INTENT_MASK"
+        4014 -> "；intent 无权限，请确认已在开放平台申请对应事件权限"
+        4914 -> "；机器人已下架，只允许连接沙箱环境"
+        4915 -> "；机器人已封禁，请申请解封后重连"
+        4001, 4002 -> "；客户端协议或载荷不符合官方规范"
+        4010, 4011, 4012 -> "；分片或版本参数不符合官方规范"
+        else -> ""
+    }
+}
+
+/** 连接配额（`session_start_limit.remaining`）已用尽：重试无意义，属终态。 */
+private class QqBotConnectionQuotaExhaustedException(message: String) : IllegalStateException(message)
 
 internal interface QqBotWebSocketConnector {
     fun connect(url: String, listener: QqBotWebSocketListener): QqBotWebSocketSession
@@ -622,7 +737,7 @@ internal interface QqBotWebSocketSession {
     fun close(statusCode: Int, reason: String)
 }
 
-internal class JavaNetQqBotWebSocketConnector(
+internal class QqBotJdkWebSocketConnector(
     private val client: HttpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(10))
         .build(),
@@ -630,12 +745,12 @@ internal class JavaNetQqBotWebSocketConnector(
     override fun connect(url: String, listener: QqBotWebSocketListener): QqBotWebSocketSession {
         val webSocket = client.newWebSocketBuilder()
             .connectTimeout(Duration.ofSeconds(10))
-            .buildAsync(URI.create(url), JavaNetListener(listener))
+            .buildAsync(URI.create(url), JdkListener(listener))
             .join()
-        return JavaNetQqBotWebSocketSession(webSocket)
+        return QqBotJdkWebSocketSession(webSocket)
     }
 
-    private class JavaNetListener(
+    private class JdkListener(
         private val listener: QqBotWebSocketListener,
     ) : WebSocket.Listener {
         private val textBuffer: StringBuilder = StringBuilder()
@@ -667,7 +782,7 @@ internal class JavaNetQqBotWebSocketConnector(
     }
 }
 
-internal class JavaNetQqBotWebSocketSession(
+internal class QqBotJdkWebSocketSession(
     private val webSocket: WebSocket,
 ) : QqBotWebSocketSession {
     override fun sendText(payload: String) {

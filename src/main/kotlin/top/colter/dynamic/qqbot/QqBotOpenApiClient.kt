@@ -43,7 +43,7 @@ internal sealed interface QqBotOpenApiScope {
 
 internal class QqBotOpenApiClient(
     private val config: QqBotConfig,
-    private val transport: QqBotHttpTransport = JavaNetQqBotHttpTransport(),
+    private val transport: QqBotHttpTransport = QqBotJdkHttpTransport(),
     private val nowMillis: () -> Long = { System.currentTimeMillis() },
 ) {
     private var cachedToken: QqBotAccessToken? = null
@@ -650,7 +650,7 @@ internal data class QqBotHttpResponse(
     val body: String,
 )
 
-internal class JavaNetQqBotHttpTransport(
+internal class QqBotJdkHttpTransport(
     private val client: HttpClient = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(10))
         .build(),

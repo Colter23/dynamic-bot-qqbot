@@ -749,7 +749,7 @@ private fun String.sha256Hex(): String {
 }
 
 internal fun createQqBotGateway(config: QqBotConfig): QqBotGateway {
-    return JavaNetQqBotWebSocketGateway(config)
+    return QqBotWebSocketGateway(config)
 }
 
 /** 调试级日志中入站文本的截断长度，避免日志被超长消息刷屏。 */

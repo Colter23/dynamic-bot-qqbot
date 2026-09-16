@@ -13,7 +13,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import top.colter.dynamic.core.plugin.MessageSinkRouteState
 
-class JavaNetQqBotWebSocketGatewayTest {
+class QqBotWebSocketGatewayTest {
     @Test
     fun `连接时获取接入点并打开 WebSocket`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
@@ -531,14 +531,14 @@ class JavaNetQqBotWebSocketGatewayTest {
         reconnectScheduler: FakeQqBotReconnectScheduler = FakeQqBotReconnectScheduler(),
         reconnect: Boolean = true,
         transport: FakeQqBotHttpTransport = defaultTransport(),
-    ): JavaNetQqBotWebSocketGateway {
+    ): QqBotWebSocketGateway {
         val config = QqBotConfig(
             enabled = true,
             appId = "app-id",
             appSecret = "secret",
             reconnect = reconnect,
         )
-        return JavaNetQqBotWebSocketGateway(
+        return QqBotWebSocketGateway(
             config = config,
             openApiClient = QqBotOpenApiClient(config = config, transport = transport),
             connector = connector,

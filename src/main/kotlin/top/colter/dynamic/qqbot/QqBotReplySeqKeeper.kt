@@ -69,8 +69,3 @@ internal class QqBotReplySeqKeeper(
         private const val DEFAULT_WINDOW_MILLIS: Long = 60L * 60 * 1000
     }
 }
-
-private fun QqBotSendPlanItem.withRequest(request: QqBotSendRequest): QqBotSendPlanItem = when (this) {
-    is QqBotSendPlanItem.Text -> copy(request = request)
-    is QqBotSendPlanItem.Media -> copy(request = request)
-}

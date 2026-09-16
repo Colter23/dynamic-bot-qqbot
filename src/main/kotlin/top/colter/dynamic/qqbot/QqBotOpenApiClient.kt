@@ -384,6 +384,7 @@ internal class QqBotOpenApiClient(
             "QQ 官方机器人只有富媒体消息可以携带 file_info"
         }
         val replyTo = request.replyToMessageId?.trim()?.takeIf { it.isNotBlank() }
+        val reference = request.referenceMessageId?.trim()?.takeIf { it.isNotBlank() }
         return json.encodeToString(
             buildJsonObject {
                 put("content", JsonPrimitive(request.content.ifBlank { " " }))
@@ -399,6 +400,16 @@ internal class QqBotOpenApiClient(
                 if (replyTo != null) {
                     put("msg_id", JsonPrimitive(replyTo))
                     put("msg_seq", JsonPrimitive(request.msgSeq))
+                }
+                // 引用展示（message_reference）与被动回复（msg_id）是两个独立字段，可同时携带；
+                // 缺了它就只能算"被动回复"，客户端不会显示引用气泡。
+                if (reference != null) {
+                    put(
+                        "message_reference",
+                        buildJsonObject {
+                            put("message_id", JsonPrimitive(reference))
+                        },
+                    )
                 }
             },
         )

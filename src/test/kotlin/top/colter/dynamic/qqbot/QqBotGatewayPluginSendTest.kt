@@ -6,6 +6,7 @@ import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import top.colter.dynamic.core.data.MediaKind
 import top.colter.dynamic.core.data.MediaRef
 import top.colter.dynamic.core.data.Message
@@ -289,6 +290,76 @@ class QqBotGatewayPluginSendTest {
 
         assertIs<MessageSendResult.Sent>(result)
         assertEquals("group-msg-1", gateway.sentRequests.single().replyToMessageId)
+    }
+
+    @Test
+    fun `回复入站消息时携带该消息的引用索引`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        // 先收到一条带 msg_idx 的群消息，插件应留存其引用索引
+        plugin.onIncomingEvent(
+            QqBotIncomingEvent(
+                type = QQBOT_GROUP_AT_MESSAGE_CREATE,
+                botAccountId = "app-id",
+                rawPayload = """
+                    {
+                      "op":0,
+                      "s":31,
+                      "t":"GROUP_AT_MESSAGE_CREATE",
+                      "d":{
+                        "id":"group-msg-1",
+                        "group_openid":"group-openid",
+                        "author":{"member_openid":"member-openid"},
+                        "content":"翻译我",
+                        "message_type":0,
+                        "message_scene":{"source":"default","ext":["msg_idx=REFIDX_self=="]},
+                        "timestamp":"2026-06-19T04:00:00Z"
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+
+        val result = plugin.sendMessage(
+            request = sendRequest(
+                target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
+                batches = listOf(MessageBatch(listOf(MessageContent.Text("译文")))),
+                replyToMessageId = "group-msg-1",
+            ),
+            routeId = "qqbot:qq-official:app-id",
+        )
+
+        assertIs<MessageSendResult.Sent>(result)
+        val sent = gateway.sentRequests.single()
+        // 被动回复用 d.id，引用展示用 msg_idx，两者不是同一个值
+        assertEquals("group-msg-1", sent.replyToMessageId)
+        assertEquals("REFIDX_self==", sent.referenceMessageId)
+    }
+
+    @Test
+    fun `没有入站索引记录时回复不带引用`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendMessage(
+            request = sendRequest(
+                target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
+                batches = listOf(MessageBatch(listOf(MessageContent.Text("译文")))),
+                replyToMessageId = "never-seen-msg",
+            ),
+            routeId = "qqbot:qq-official:app-id",
+        )
+
+        assertIs<MessageSendResult.Sent>(result)
+        val sent = gateway.sentRequests.single()
+        assertEquals("never-seen-msg", sent.replyToMessageId)
+        // 拿不到索引时退化为仅被动回复，不影响发送
+        assertNull(sent.referenceMessageId)
     }
 
     @Test

@@ -553,4 +553,114 @@ class QqBotIncomingMessageMapperTest {
         assertEquals(1, incoming.segments.size)
         assertNull(incoming.replyTo)
     }
+
+    @Test
+    fun `普通消息事件提取消息自身的引用索引`() {
+        val reference = QqBotIncomingMessageMapper.toReplyReference(
+            QqBotIncomingEvent(
+                type = QQBOT_GROUP_AT_MESSAGE_CREATE,
+                botAccountId = "bot-app-id",
+                rawPayload = """
+                    {
+                      "op":0,
+                      "s":21,
+                      "t":"GROUP_AT_MESSAGE_CREATE",
+                      "d":{
+                        "id":"group-msg-1",
+                        "group_openid":"group-openid",
+                        "author":{"member_openid":"member-openid"},
+                        "content":"你好",
+                        "message_type":0,
+                        "message_scene":{"source":"default","ext":["msg_idx=REFIDX_self=="]},
+                        "timestamp":"2026-06-19T04:00:00Z"
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+
+        assertEquals(QqBotReplyReference(messageId = "group-msg-1", messageIndex = "REFIDX_self=="), reference)
+    }
+
+    @Test
+    fun `有引用时取本条消息自身的索引而非被引用索引`() {
+        // ref_msg_idx 是"本条消息所引用那条消息"的索引（格式 TMP_...），
+        // 而引用回复本条消息需要的是它自身的 msg_idx（REFIDX_...==），两者不能混用
+        val reference = QqBotIncomingMessageMapper.toReplyReference(
+            QqBotIncomingEvent(
+                type = QQBOT_GROUP_MESSAGE_CREATE,
+                botAccountId = "bot-app-id",
+                rawPayload = """
+                    {
+                      "op":0,
+                      "s":22,
+                      "t":"GROUP_MESSAGE_CREATE",
+                      "d":{
+                        "id":"group-msg-2",
+                        "group_openid":"group-openid",
+                        "author":{"member_openid":"member-openid"},
+                        "content":"收到",
+                        "message_type":103,
+                        "message_scene":{
+                          "source":"default",
+                          "ext":[
+                            "ref_msg_idx=TMP_xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+                            "msg_idx=REFIDX_self=="
+                          ]
+                        },
+                        "timestamp":"2026-06-19T04:00:00Z"
+                      }
+                    }
+                """.trimIndent(),
+            ),
+        )
+
+        assertEquals("REFIDX_self==", reference?.messageIndex)
+        assertEquals("group-msg-2", reference?.messageId)
+    }
+
+    @Test
+    fun `非消息事件或缺少索引时不产生引用记录`() {
+        assertNull(
+            QqBotIncomingMessageMapper.toReplyReference(
+                QqBotIncomingEvent(
+                    type = QQBOT_GROUP_ADD_ROBOT,
+                    botAccountId = "bot-app-id",
+                    rawPayload = """
+                        {
+                          "op":0,
+                          "s":23,
+                          "t":"GROUP_ADD_ROBOT",
+                          "d":{"group_openid":"group-openid","timestamp":1789480672}
+                        }
+                    """.trimIndent(),
+                ),
+            ),
+        )
+
+        // 消息事件但缺少 message_scene.ext.msg_idx：无法引用，返回 null
+        assertNull(
+            QqBotIncomingMessageMapper.toReplyReference(
+                QqBotIncomingEvent(
+                    type = QQBOT_GROUP_AT_MESSAGE_CREATE,
+                    botAccountId = "bot-app-id",
+                    rawPayload = """
+                        {
+                          "op":0,
+                          "s":24,
+                          "t":"GROUP_AT_MESSAGE_CREATE",
+                          "d":{
+                            "id":"group-msg-3",
+                            "group_openid":"group-openid",
+                            "author":{"member_openid":"member-openid"},
+                            "content":"没有索引",
+                            "message_type":0,
+                            "timestamp":"2026-06-19T04:00:00Z"
+                          }
+                        }
+                    """.trimIndent(),
+                ),
+            ),
+        )
+    }
 }

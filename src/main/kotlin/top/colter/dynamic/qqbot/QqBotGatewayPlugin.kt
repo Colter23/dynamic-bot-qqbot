@@ -63,6 +63,7 @@ public class QqBotGatewayPlugin :
     private var incomingJob: Job? = null
     private var running: Boolean = false
     private val retryReplySeqKeeper = QqBotReplySeqKeeper()
+    private val messageIndexKeeper = QqBotMessageIndexKeeper()
     private var targetLedger: QqBotTargetLedger? = null
 
     override val configId: String
@@ -178,14 +179,16 @@ public class QqBotGatewayPlugin :
             return MessageSendResult.failed("QQ 官方机器人账号不可用：$accountId")
         }
 
-        // 官方按 msg_id+msg_seq 去重被动回复；主项目重试时必须续编 seq，否则重试必然被去重拒绝
-        val plan = retryReplySeqKeeper.advance(
-            request.replyToMessageId,
-            QqBotMessageMapper.toSendPlan(
+        // 引用展示需要消息自身事件里的 msg_idx，主项目只给得出被动回复用的 d.id，故先补引用
+        val replyPlan = messageIndexKeeper.apply(
+            replyToMessageId = request.replyToMessageId,
+            plan = QqBotMessageMapper.toSendPlan(
                 batches = request.batches,
                 replyToMessageId = request.replyToMessageId,
             ),
         )
+        // 官方按 msg_id+msg_seq 去重被动回复；主项目重试时必须续编 seq，否则重试必然被去重拒绝
+        val plan = retryReplySeqKeeper.advance(request.replyToMessageId, replyPlan)
         return when (val target = QqBotTarget.fromAddress(request.target)) {
             is QqBotTarget.User -> sendPlanWithReceipt(
                 routeId = routeId,
@@ -326,6 +329,10 @@ public class QqBotGatewayPlugin :
             "QQ 官方机器人收到入站事件：type=${event.type} account=${event.botAccountId.orEmpty().ifBlank { "-" }}"
         }
         recordTargetSighting(event)
+        // 留存消息自身的引用索引：主项目稍后回复该消息时只有 d.id，引用需要 msg_idx
+        runCatching { QqBotIncomingMessageMapper.toReplyReference(event) }
+            .getOrNull()
+            ?.let { messageIndexKeeper.remember(it.messageId, it.messageIndex) }
         val incoming = runCatching { QqBotIncomingMessageMapper.toIncomingMessage(event) }
             .onFailure { error ->
                 logger.warn(error) { "QQ 官方机器人入站消息解析失败：type=${event.type}" }

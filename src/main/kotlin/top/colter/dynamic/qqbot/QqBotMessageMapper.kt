@@ -25,6 +25,13 @@ internal data class QqBotSendRequest(
     val replyToMessageId: String? = null,
     val msgSeq: Int = 1,
     val mediaFileInfo: String? = null,
+    /**
+     * 引用回复用的消息索引（形如 `REFIDX_xxx==`），对应官方 `message_reference.message_id`。
+     *
+     * 与 [replyToMessageId] 不是同一个值：后者是事件 `d.id`，用于被动回复（`msg_id`）；
+     * 引用展示需要的是消息自身事件 `message_scene.ext` 里的 `msg_idx`。
+     */
+    val referenceMessageId: String? = null,
 )
 
 /** 从入站事件中提取到的目标：账本只需要类型与 openid。 */
@@ -32,6 +39,22 @@ internal data class QqBotTargetSighting(
     val kind: TargetKind,
     val externalId: String,
 )
+
+/**
+ * 入站消息自身的引用索引：留存后可用于以引用形式回复该消息。
+ *
+ * [messageId] 为事件 `d.id`（被动回复用），[messageIndex] 为 `message_scene.ext.msg_idx`（引用用）。
+ */
+internal data class QqBotReplyReference(
+    val messageId: String,
+    val messageIndex: String,
+)
+
+/** 为发送计划中的请求替换底层 [QqBotSendRequest]，保留 Text / Media 的具体类型。 */
+internal fun QqBotSendPlanItem.withRequest(request: QqBotSendRequest): QqBotSendPlanItem = when (this) {
+    is QqBotSendPlanItem.Text -> copy(request = request)
+    is QqBotSendPlanItem.Media -> copy(request = request)
+}
 
 internal data class QqBotSendReceipt(
     val messageId: String,
@@ -341,6 +364,27 @@ internal object QqBotIncomingMessageMapper {
                 ?.let { QqBotTargetSighting(TargetKind.USER, it) }
             else -> null
         }
+    }
+
+    /**
+     * 提取"本条消息自身的引用索引"，留存后可用于以引用形式回复它。
+     *
+     * 官方引用回复（`message_reference.message_id`）要求填**该消息自身事件**的
+     * `message_scene.ext.msg_idx`（形如 `REFIDX_xxx==`）；这与被动回复所用的消息 ID
+     * （事件 `d.id`）**不是同一个值**，所以必须在接收时留存两者的映射。
+     *
+     * 注意别与 `ref_msg_idx` 混淆：后者是"本条消息所引用的那条消息"的索引，格式也不同（`TMP_...`）。
+     *
+     * 返回 null 表示该事件不可作为引用对象（非消息事件，或缺少消息 ID / 索引）。
+     */
+    fun toReplyReference(event: QqBotIncomingEvent): QqBotReplyReference? {
+        if (event.type !in QQBOT_MESSAGE_EVENT_TYPES) return null
+        val dispatch = runCatching { QqBotWebSocketProtocol.parseDispatch(event.rawPayload) }.getOrNull()
+            ?: return null
+        val data = dispatch.data.asObjectOrNull() ?: return null
+        val messageId = data.jsonString("id")?.trim()?.takeIf { it.isNotBlank() } ?: return null
+        val messageIndex = data.messageSceneExt()["msg_idx"]?.trim()?.takeIf { it.isNotBlank() } ?: return null
+        return QqBotReplyReference(messageId = messageId, messageIndex = messageIndex)
     }
 
     private fun JsonObject.toC2cIncoming(event: QqBotIncomingEvent): IncomingMessage? {
@@ -666,6 +710,13 @@ internal const val QQBOT_GROUP_MSG_REJECT: String = "GROUP_MSG_REJECT"
 internal const val QQBOT_TEXT_MSG_TYPE: Int = 0
 internal const val QQBOT_MEDIA_MSG_TYPE: Int = 7
 internal const val QQBOT_MESSAGE_TYPE_QUOTE: Int = 103
+
+/** 携带消息体、可作为回复/引用对象的消息事件。 */
+internal val QQBOT_MESSAGE_EVENT_TYPES: Set<String> = setOf(
+    QQBOT_C2C_MESSAGE_CREATE,
+    QQBOT_GROUP_AT_MESSAGE_CREATE,
+    QQBOT_GROUP_MESSAGE_CREATE,
+)
 private const val QQBOT_EMPTY_MESSAGE_TEXT: String = "（空消息）"
 private const val QQBOT_MENTION_ALL_FALLBACK: String = "@全体成员"
 private val QQBOT_OFFICIAL_MENTION_PATTERN: Regex = Regex("""<@([^>]+)>""")

@@ -531,6 +531,65 @@ class QqBotOpenApiClientTest {
     }
 
     @Test
+    fun `回复携带引用索引时提交 message_reference`() {
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}"""),
+                    QqBotHttpResponse(200, """{"id":"group-send-1"}"""),
+                ),
+            ),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        client.sendMessage(
+            scope = QqBotOpenApiScope.Group("group-openid"),
+            request = QqBotSendRequest(
+                content = "译文",
+                replyToMessageId = "group-msg-1",
+                referenceMessageId = " REFIDX_self== ",
+            ),
+        )
+
+        val body = Json.parseToJsonElement(transport.posts.last().body).jsonObject
+        // 被动回复（msg_id/msg_seq）与引用展示（message_reference）是两个独立字段，同时携带
+        assertEquals("group-msg-1", body.getValue("msg_id").jsonPrimitive.content)
+        assertEquals(1, body.getValue("msg_seq").jsonPrimitive.int)
+        assertEquals(
+            "REFIDX_self==",
+            body.getValue("message_reference").jsonObject.getValue("message_id").jsonPrimitive.content,
+        )
+    }
+
+    @Test
+    fun `没有引用索引时不提交 message_reference`() {
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}"""),
+                    QqBotHttpResponse(200, """{"id":"group-send-2"}"""),
+                ),
+            ),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        client.sendMessage(
+            scope = QqBotOpenApiScope.Group("group-openid"),
+            request = QqBotSendRequest(content = "译文", replyToMessageId = "group-msg-1"),
+        )
+
+        val body = Json.parseToJsonElement(transport.posts.last().body).jsonObject
+        assertEquals("group-msg-1", body.getValue("msg_id").jsonPrimitive.content)
+        assertTrue(!body.containsKey("message_reference"))
+    }
+
+    @Test
     fun `群信息接口解析群名称与人数`() {
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(

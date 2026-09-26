@@ -397,6 +397,40 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
+    fun `富媒体准备超时应上报可重试失败而不是状态未知`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FailingGateway(
+            QqBotMediaPreparationException(java.net.http.HttpTimeoutException("请求超时")),
+        )
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendMessage(
+            request = deliveryRequest(
+                target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
+                batches = listOf(
+                    MessageBatch(
+                        listOf(
+                            MessageContent.Image(
+                                fallbackText = "图片",
+                                image = MediaRef(
+                                    uri = "https://example.com/image.png",
+                                    kind = MediaKind.IMAGE,
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            routeId = "qqbot:qq-official:app-id",
+        )
+
+        val failed = assertIs<MessageSendResult.Failed>(result)
+        assertEquals(true, failed.retryable)
+        assertEquals(true, failed.reason.contains("富媒体资源准备失败"))
+    }
+
+    @Test
     fun `业务错误码判定为不可重试时透传终态失败`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FailingGateway(

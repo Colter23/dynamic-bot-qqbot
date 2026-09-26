@@ -656,7 +656,7 @@ public class QqBotGatewayPlugin :
                             sinkTransportId = transportId,
                         )
                     } else {
-                        val retryable = (error as? QqBotOpenApiException)?.retryable ?: true
+                        val retryable = error.retryableForDelivery()
                         MessageSendResult.failed(
                             reason = error.sendOutcomeDescription(failureLabel),
                             retryable = retryable,
@@ -684,12 +684,22 @@ public class QqBotGatewayPlugin :
      * 由人工或上层按需处理。
      */
     private fun Throwable.isSendOutcomeUnknown(): Boolean {
+        if (findCause<QqBotMediaPreparationException>() != null) return false
         generateSequence(this) { it.cause }.forEach { error ->
             if (error is java.net.http.HttpTimeoutException) return true
             if (error is java.io.IOException && error !is java.net.ConnectException) return true
             if (error is QqBotOpenApiException && error.outcomeUnknown) return true
         }
         return false
+    }
+
+    private fun Throwable.retryableForDelivery(): Boolean {
+        findCause<QqBotMediaPreparationException>()?.let { return it.retryable }
+        return (this as? QqBotOpenApiException)?.retryable ?: true
+    }
+
+    private inline fun <reified T : Throwable> Throwable.findCause(): T? {
+        return generateSequence(this) { it.cause }.filterIsInstance<T>().firstOrNull()
     }
 
     private fun Throwable.sendOutcomeDescription(failureLabel: String): String {

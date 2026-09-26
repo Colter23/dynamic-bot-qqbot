@@ -151,7 +151,15 @@ internal class QqBotWebSocketGateway(
         request: QqBotSendRequest,
     ): QqBotSendReceipt = withContext(Dispatchers.IO) {
         requireAccount(accountId)
-        val resource = resolveMediaResource(scope, media)
+        val resource = try {
+            resolveMediaResource(scope, media)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            // 资源登记阶段尚未调用消息接口，失败后可以安全重试；不要让它被上层
+            // 当成“消息已发出但响应丢失”的状态未知错误。
+            throw QqBotMediaPreparationException(error)
+        }
         openApiClient.sendMessage(scope, request.copy(mediaFileInfo = resource.fileInfo)).also { receipt ->
             logger.debug { "QQ 官方机器人富媒体消息已发送：scope=${scope.resource}/${scope.id} messageId=${receipt.messageId}" }
         }

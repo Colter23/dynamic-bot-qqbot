@@ -62,6 +62,22 @@ internal data class QqBotIncomingEvent(
     val botAccountId: String? = null,
 )
 
+/**
+ * 富媒体资源尚未登记成功，消息接口还没有被调用。
+ *
+ * 这类失败可以安全交给主项目重试；它不能和消息接口本身的网络超时混为一谈，
+ * 后者可能已经被 QQ 受理，继续重试会有重复发送风险。
+ */
+internal class QqBotMediaPreparationException(
+    cause: Throwable,
+) : RuntimeException(
+    "QQ 官方机器人富媒体资源准备失败：${cause.message ?: cause::class.simpleName.orEmpty()}",
+    cause,
+) {
+    val retryable: Boolean
+        get() = (cause as? QqBotOpenApiException)?.retryable ?: true
+}
+
 internal class NoopQqBotGateway : QqBotGateway {
     override suspend fun connect(onIncomingEvent: (QqBotIncomingEvent) -> Unit) {
     }

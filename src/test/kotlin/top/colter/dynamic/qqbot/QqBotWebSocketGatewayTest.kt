@@ -1,5 +1,6 @@
 package top.colter.dynamic.qqbot
 
+import java.net.http.HttpTimeoutException
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlinx.coroutines.test.runTest
@@ -10,6 +11,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertIs
 import kotlin.test.assertNull
 import top.colter.dynamic.core.plugin.MessageSinkRouteState
 
@@ -412,6 +415,43 @@ class QqBotWebSocketGatewayTest {
     }
 
     @Test
+    fun `媒体登记超时包装为媒体准备异常且不会调用消息接口`() = runTest {
+        val connector = FakeQqBotWebSocketConnector()
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
+            ),
+            getResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"url":"wss://api.bot.qq.com/websocket","shards":1}""")),
+            ),
+            postExceptionAtCallIndex = 1,
+            postException = HttpTimeoutException("请求超时"),
+        )
+        val gateway = testGateway(connector = connector, transport = transport)
+
+        gateway.connect { }
+        connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        connector.listener.onText("""{"op":0,"s":88,"t":"READY","d":{"session_id":"session-a"}}""")
+
+        val error = assertFailsWith<QqBotMediaPreparationException> {
+            gateway.sendGroupMediaMessage(
+                accountId = "app-id",
+                groupOpenid = "group-openid",
+                media = QqBotMediaResourceSource(
+                    fileType = QqBotMediaFileType.IMAGE,
+                    url = "https://example.com/a.png",
+                ),
+                request = QqBotSendRequest(content = "图片", msgType = QQBOT_MEDIA_MSG_TYPE),
+            )
+        }
+
+        assertIs<HttpTimeoutException>(error.cause)
+        assertEquals("QQ 官方机器人富媒体资源准备失败：请求超时", error.message)
+        assertEquals(2, transport.posts.size)
+        assertEquals("https://api.bot.qq.com/v2/groups/group-openid/files", transport.posts[1].url)
+    }
+
+    @Test
     fun `就绪网关通过 OpenAPI 撤回单聊和群聊消息`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val transport = FakeQqBotHttpTransport(
@@ -690,14 +730,21 @@ class QqBotWebSocketGatewayTest {
         private val getResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
         private val deleteResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
         private val putResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
+        private val postExceptionAtCallIndex: Int? = null,
+        private val postException: Throwable? = null,
     ) : QqBotHttpTransport {
         val posts: MutableList<RecordedPost> = mutableListOf()
         val gets: MutableList<RecordedGet> = mutableListOf()
         val deletes: MutableList<RecordedDelete> = mutableListOf()
         val puts: MutableList<RecordedPut> = mutableListOf()
+        private var postCallIndex: Int = 0
 
         override fun postJson(url: String, headers: Map<String, String>, body: String): QqBotHttpResponse {
             posts += RecordedPost(url = url, headers = headers, body = body)
+            val callIndex = postCallIndex++
+            if (callIndex == postExceptionAtCallIndex) {
+                throw requireNotNull(postException) { "postException must be set when an exception index is configured" }
+            }
             return postResponses.removeFirst()
         }
 

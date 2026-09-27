@@ -161,6 +161,79 @@ class QqBotOpenApiClientTest {
     }
 
     @Test
+    fun `发送接口 2xx 但缺少消息 ID 时判定为状态未知`() {
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}"""),
+                    QqBotHttpResponse(200, """{"timestamp":"2026-06-19T04:00:00Z"}"""),
+                ),
+            ),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        val error = assertFailsWith<QqBotOpenApiException> {
+            client.sendMessage(
+                scope = QqBotOpenApiScope.Group("group-openid"),
+                request = QqBotSendRequest(content = "hello", replyToMessageId = "source-msg"),
+            )
+        }
+
+        assertEquals(true, error.outcomeUnknown)
+    }
+
+    @Test
+    fun `鉴权请求收到 401 时刷新令牌并只重试一次`() {
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}"""),
+                    QqBotHttpResponse(401, """{"code":"401","message":"token expired"}"""),
+                    QqBotHttpResponse(200, """{"access_token":"token-b","expires_in":7200}"""),
+                    QqBotHttpResponse(200, """{"id":"send-1"}"""),
+                ),
+            ),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        val receipt = client.sendMessage(
+            scope = QqBotOpenApiScope.Group("group-openid"),
+            request = QqBotSendRequest(content = "hello", replyToMessageId = "source-msg"),
+        )
+
+        assertEquals("send-1", receipt.messageId)
+        assertEquals("QQBot token-b", transport.posts.last().headers.getValue("Authorization"))
+        assertEquals(4, transport.posts.size)
+    }
+
+    @Test
+    fun `主动消息限流同时考虑机器人和单目标维度`() {
+        var nowMillis = 0L
+        val sleeps = mutableListOf<Long>()
+        val limiter = QqBotMessageRateLimiter(
+            globalIntervalMillis = 2_100L,
+            targetIntervalMillis = 3_100L,
+            nowMillis = { nowMillis },
+            sleepMillis = { delayMillis ->
+                sleeps += delayMillis
+                nowMillis += delayMillis
+            },
+        )
+
+        limiter.acquire(QqBotOpenApiScope.Group("group-a"))
+        limiter.acquire(QqBotOpenApiScope.Group("group-a"))
+        limiter.acquire(QqBotOpenApiScope.Group("group-b"))
+
+        assertEquals(listOf(3_100L, 1_100L), sleeps)
+    }
+
+    @Test
     fun `上传通道临时故障码判定为可重试瞬态`() {
         val transientCodes = listOf("40093001", "850026", "850027")
         transientCodes.forEach { code ->

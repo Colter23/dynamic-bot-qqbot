@@ -8,6 +8,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import top.colter.dynamic.core.config.ConfigApplyResult
 import top.colter.dynamic.core.config.ConfigurablePlugin
 import top.colter.dynamic.core.config.loadOrCreate
@@ -64,6 +66,7 @@ public class QqBotGatewayPlugin :
     private var running: Boolean = false
     private val retryReplySeqKeeper = QqBotReplySeqKeeper()
     private val messageIndexKeeper = QqBotMessageIndexKeeper()
+    private val groupInfoRateLimiter = QqBotIntervalRateLimiter(GROUP_INFO_REQUEST_INTERVAL_MILLIS)
     private var targetLedger: QqBotTargetLedger? = null
 
     override val configId: String
@@ -112,16 +115,19 @@ public class QqBotGatewayPlugin :
 
         val nextGateway = createQqBotGateway(config)
         startIncomingScope()
+        // 连接建立过程中服务端已经可能推送事件；先进入接收状态，避免丢掉首条消息。
+        gateway = nextGateway
+        running = true
         runCatching {
             nextGateway.connect(::onIncomingEvent)
         }.onFailure { error ->
+            running = false
+            gateway = NoopQqBotGateway()
             stopIncomingScope()
             nextGateway.close()
             logger.error(error) { "QQ 官方机器人 WebSocket 网关启动失败：appId=${config.appId}" }
             throw error
         }
-        gateway = nextGateway
-        running = true
         logger.info { "QQ 官方机器人 WebSocket 网关已启动：appId=${config.appId}" }
         startStartupTasks()
     }
@@ -189,12 +195,24 @@ public class QqBotGatewayPlugin :
         )
         // 官方按 msg_id+msg_seq 去重被动回复；主项目重试时必须续编 seq，否则重试必然被去重拒绝
         val plan = retryReplySeqKeeper.advance(request.replyToMessageId, replyPlan)
+        val limitedPlan = when (val target = QqBotTarget.fromAddress(request.target)) {
+            is QqBotTarget.User -> plan.limitPassiveReplies(QQBOT_USER_PASSIVE_REPLY_LIMIT)
+            is QqBotTarget.Group -> plan.limitPassiveReplies(QQBOT_GROUP_PASSIVE_REPLY_LIMIT)
+            is QqBotTarget.Unsupported -> plan
+        }
+        if (limitedPlan.zip(plan).any { (limited, original) ->
+                limited.request.replyToMessageId != original.request.replyToMessageId
+            }) {
+            logger.warn {
+                "QQ 官方机器人被动回复超过平台限制，超出部分改为主动消息：target=${request.target.stableValue()}"
+            }
+        }
         return when (val target = QqBotTarget.fromAddress(request.target)) {
             is QqBotTarget.User -> sendPlanWithReceipt(
                 routeId = routeId,
                 accountId = accountId,
                 failureLabel = "QQ 官方机器人单聊消息发送失败",
-                plan = plan,
+                plan = limitedPlan,
             ) { item ->
                 when (item) {
                     is QqBotSendPlanItem.Text -> gateway.sendUserMessage(
@@ -214,7 +232,7 @@ public class QqBotGatewayPlugin :
                 routeId = routeId,
                 accountId = accountId,
                 failureLabel = "QQ 官方机器人群聊消息发送失败",
-                plan = plan,
+                plan = limitedPlan,
             ) { item ->
                 when (item) {
                     is QqBotSendPlanItem.Text -> gateway.sendGroupMessage(
@@ -449,9 +467,8 @@ public class QqBotGatewayPlugin :
             warmUpPlatformAccount()
             if (ledger == null || pending.isEmpty()) return@launch
             logger.info { "QQ 官方机器人开始补全群资料：count=${pending.size} account=$accountId" }
-            pending.forEachIndexed { index, groupOpenid ->
+            pending.forEach { groupOpenid ->
                 // 群多时避免启动瞬间连打一串请求
-                if (index > 0) delay(BACKFILL_REQUEST_INTERVAL_MILLIS)
                 fetchGroupInfo(ledger, accountId, groupOpenid)
             }
         }
@@ -492,7 +509,7 @@ public class QqBotGatewayPlugin :
         if (!ledger.tryBeginInfoRequest(TargetKind.GROUP, groupOpenid)) return
         val nowEpochSeconds = System.currentTimeMillis() / 1000
         val info = try {
-            gateway.groupInfo(accountId, groupOpenid)
+            groupInfoRateLimiter.withPermit { gateway.groupInfo(accountId, groupOpenid) }
         } catch (error: CancellationException) {
             // 插件停止：释放名额后原样抛出，不登记任何冷却
             ledger.abandonInfoRequest(TargetKind.GROUP, groupOpenid)
@@ -770,7 +787,9 @@ private const val ACCOUNT_READY_TIMEOUT_MILLIS: Long = 60_000L
 private const val ACCOUNT_READY_POLL_MILLIS: Long = 1_000L
 
 /** 启动补全群资料时，相邻两次请求之间的间隔（群多时不至于启动瞬间连打一串请求）。 */
-private const val BACKFILL_REQUEST_INTERVAL_MILLIS: Long = 300L
+private const val GROUP_INFO_REQUEST_INTERVAL_MILLIS: Long = 2_100L
+private const val QQBOT_USER_PASSIVE_REPLY_LIMIT: Int = 4
+private const val QQBOT_GROUP_PASSIVE_REPLY_LIMIT: Int = 5
 
 /** 群资料拉取失败后的重试冷却：语义明确的业务码失败（多半无权限）按长期，其余按短退避。 */
 private const val INFO_RETRY_PERMANENT_SECONDS: Long = 24L * 60 * 60
@@ -784,3 +803,19 @@ private val INFO_RETRY_TRANSIENT_CODES: Set<String> = setOf("40034100")
 
 /** HTTP 429 频率限制。 */
 private const val HTTP_TOO_MANY_REQUESTS: Int = 429
+/** 资料接口按 30 QPM 限制；所有实时与启动补全请求共用一个串行间隔器。 */
+private class QqBotIntervalRateLimiter(
+    private val intervalMillis: Long,
+    private val nowMillis: () -> Long = { System.currentTimeMillis() },
+) {
+    private val lock = Mutex()
+    private var nextAllowedAtMillis: Long = 0L
+
+    suspend fun <T> withPermit(block: suspend () -> T): T = lock.withLock {
+        val now = nowMillis()
+        val waitMillis = (nextAllowedAtMillis - now).coerceAtLeast(0L)
+        nextAllowedAtMillis = maxOf(now, nextAllowedAtMillis) + intervalMillis
+        if (waitMillis > 0) delay(waitMillis)
+        block()
+    }
+}

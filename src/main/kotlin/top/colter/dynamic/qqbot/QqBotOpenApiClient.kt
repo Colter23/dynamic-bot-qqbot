@@ -47,12 +47,14 @@ internal class QqBotOpenApiClient(
     private val nowMillis: () -> Long = { System.currentTimeMillis() },
 ) {
     private var cachedToken: QqBotAccessToken? = null
+    private val tokenLock = Any()
+    private val messageRateLimiter = QqBotMessageRateLimiter(nowMillis = nowMillis)
 
-    fun accessToken(): QqBotAccessToken {
+    fun accessToken(): QqBotAccessToken = synchronized(tokenLock) {
         val now = nowMillis()
         cachedToken
             ?.takeIf { token -> now + ACCESS_TOKEN_REFRESH_SKEW_MILLIS < token.expiresAtMillis }
-            ?.let { return it }
+            ?.let { return@synchronized it }
 
         val appId = config.appId.trim()
         val appSecret = config.appSecret.trim()
@@ -97,21 +99,18 @@ internal class QqBotOpenApiClient(
             )
         }
 
-        return QqBotAccessToken(
+        QqBotAccessToken(
             value = tokenValue,
             expiresAtMillis = now + expiresInSeconds * MILLIS_PER_SECOND,
         ).also { cachedToken = it }
     }
-
     fun gatewayBotEndpoint(): QqBotGatewayEndpoint {
-        val token = accessToken()
-        val response = transport.get(
-            url = "$OPEN_API_BASE_URL/gateway/bot",
-            headers = mapOf(
-                "Accept" to "application/json",
-                "Authorization" to qqBotAuthorization(token.value),
-            ),
-        )
+        val response = authorizedRequest { headers ->
+            transport.get(
+                url = "$OPEN_API_BASE_URL/gateway/bot",
+                headers = headers,
+            )
+        }
         ensureSuccess("获取 QQ 官方机器人 WebSocket 接入点", response)
 
         val root = parseResponseObject("获取 QQ 官方机器人 WebSocket 接入点", response.body)
@@ -133,11 +132,17 @@ internal class QqBotOpenApiClient(
     }
 
     fun sendMessage(scope: QqBotOpenApiScope, request: QqBotSendRequest): QqBotSendReceipt {
-        val response = transport.postJson(
-            url = "$OPEN_API_BASE_URL/v2/${scope.resource}/${scope.id.pathSegment()}/messages",
-            headers = authorizedHeaders(),
-            body = encodeSendRequest(request),
-        )
+        if (request.replyToMessageId.isNullOrBlank()) {
+            messageRateLimiter.acquire(scope)
+        }
+        val body = encodeSendRequest(request)
+        val response = authorizedRequest { headers ->
+            transport.postJson(
+                url = "$OPEN_API_BASE_URL/v2/${scope.resource}/${scope.id.pathSegment()}/messages",
+                headers = headers,
+                body = body,
+            )
+        }
         ensureSuccess("发送 QQ 官方机器人消息", response)
         return parseSendReceipt("发送 QQ 官方机器人消息", response)
     }
@@ -149,20 +154,26 @@ internal class QqBotOpenApiClient(
      * 传 [QqBotMediaPrepareRequest.uploadId] 走分片上传合并。
      */
     fun prepareMedia(scope: QqBotOpenApiScope, request: QqBotMediaPrepareRequest): QqBotMediaResource {
-        val response = transport.postJson(
-            url = "$OPEN_API_BASE_URL/v2/${scope.resource}/${scope.id.pathSegment()}/files",
-            headers = authorizedHeaders(),
-            body = encodeMediaPrepareRequest(request),
-        )
+        val body = encodeMediaPrepareRequest(request)
+        val response = authorizedRequest { headers ->
+            transport.postJsonWithTimeout(
+                url = "$OPEN_API_BASE_URL/v2/${scope.resource}/${scope.id.pathSegment()}/files",
+                headers = headers,
+                body = body,
+                timeout = Duration.ofSeconds(MEDIA_PREPARE_TIMEOUT_SECONDS),
+            )
+        }
         ensureSuccess("登记 QQ 官方机器人富媒体资源", response)
         return parseMediaResource("登记 QQ 官方机器人富媒体资源", response)
     }
 
     fun recallMessage(scope: QqBotOpenApiScope, messageId: String) {
-        val response = transport.delete(
-            url = "$OPEN_API_BASE_URL/v2/${scope.resource}/${scope.id.pathSegment()}/messages/${messageId.pathSegment()}",
-            headers = authorizedHeaders(),
-        )
+        val response = authorizedRequest { headers ->
+            transport.delete(
+                url = "$OPEN_API_BASE_URL/v2/${scope.resource}/${scope.id.pathSegment()}/messages/${messageId.pathSegment()}",
+                headers = headers,
+            )
+        }
         ensureSuccess("撤回 QQ 官方机器人消息", response)
     }
 
@@ -174,10 +185,12 @@ internal class QqBotOpenApiClient(
      */
     fun groupInfo(groupOpenid: String): QqBotGroupInfo {
         val action = "获取 QQ 官方机器人群信息"
-        val response = transport.get(
-            url = "$OPEN_API_BASE_URL/v2/groups/${groupOpenid.pathSegment()}/info",
-            headers = authorizedHeaders(),
-        )
+        val response = authorizedRequest { headers ->
+            transport.get(
+                url = "$OPEN_API_BASE_URL/v2/groups/${groupOpenid.pathSegment()}/info",
+                headers = headers,
+            )
+        }
         ensureSuccess(action, response)
 
         val root = parseResponseObject(action, response.body)
@@ -195,10 +208,12 @@ internal class QqBotOpenApiClient(
      */
     fun botInfo(): QqBotBotInfo {
         val action = "获取 QQ 官方机器人资料"
-        val response = transport.get(
-            url = "$OPEN_API_BASE_URL/users/@me",
-            headers = authorizedHeaders(),
-        )
+        val response = authorizedRequest { headers ->
+            transport.get(
+                url = "$OPEN_API_BASE_URL/users/@me",
+                headers = headers,
+            )
+        }
         ensureSuccess(action, response)
 
         val root = parseResponseObject(action, response.body)
@@ -226,20 +241,23 @@ internal class QqBotOpenApiClient(
     /** 分片上传第一步：预上传，返回 `upload_id` 与各分片预签名 URL。 */
     fun prepareUpload(scope: QqBotOpenApiScope, request: QqBotUploadPrepareRequest): QqBotUploadTicket {
         val action = "准备 QQ 官方机器人分片上传"
-        val response = transport.postJson(
-            url = "$OPEN_API_BASE_URL/v2/${scope.resource}/${scope.id.pathSegment()}/upload_prepare",
-            headers = authorizedHeaders(),
-            body = json.encodeToString(
-                buildJsonObject {
-                    put("file_type", JsonPrimitive(request.fileType.code))
-                    put("file_size", JsonPrimitive(request.fileSizeBytes.toString()))
-                    put("file_name", JsonPrimitive(request.fileName))
-                    put("md5", JsonPrimitive(request.md5))
-                    put("sha1", JsonPrimitive(request.sha1))
-                    put("md5_10m", JsonPrimitive(request.md5Prefix))
-                },
-            ),
+        val body = json.encodeToString(
+            buildJsonObject {
+                put("file_type", JsonPrimitive(request.fileType.code))
+                put("file_size", JsonPrimitive(request.fileSizeBytes.toString()))
+                put("file_name", JsonPrimitive(request.fileName))
+                put("md5", JsonPrimitive(request.md5))
+                put("sha1", JsonPrimitive(request.sha1))
+                put("md5_10m", JsonPrimitive(request.md5Prefix))
+            },
         )
+        val response = authorizedRequest { headers ->
+            transport.postJson(
+                url = "$OPEN_API_BASE_URL/v2/${scope.resource}/${scope.id.pathSegment()}/upload_prepare",
+                headers = headers,
+                body = body,
+            )
+        }
         ensureSuccess(action, response)
 
         val root = parseResponseObject(action, response.body)
@@ -305,18 +323,21 @@ internal class QqBotOpenApiClient(
 
     /** 分片上传第三步：通知服务端该分片已完成。 */
     fun finishUploadPart(scope: QqBotOpenApiScope, request: QqBotUploadPartFinishRequest) {
-        val response = transport.postJson(
-            url = "$OPEN_API_BASE_URL/v2/${scope.resource}/${scope.id.pathSegment()}/upload_part_finish",
-            headers = authorizedHeaders(),
-            body = json.encodeToString(
-                buildJsonObject {
-                    put("upload_id", JsonPrimitive(request.uploadId))
-                    put("part_index", JsonPrimitive(request.partIndex))
-                    put("block_size", JsonPrimitive(request.blockSizeBytes.toString()))
-                    put("md5", JsonPrimitive(request.md5))
-                },
-            ),
+        val body = json.encodeToString(
+            buildJsonObject {
+                put("upload_id", JsonPrimitive(request.uploadId))
+                put("part_index", JsonPrimitive(request.partIndex))
+                put("block_size", JsonPrimitive(request.blockSizeBytes.toString()))
+                put("md5", JsonPrimitive(request.md5))
+            },
         )
+        val response = authorizedRequest { headers ->
+            transport.postJson(
+                url = "$OPEN_API_BASE_URL/v2/${scope.resource}/${scope.id.pathSegment()}/upload_part_finish",
+                headers = headers,
+                body = body,
+            )
+        }
         ensureSuccess("确认 QQ 官方机器人分片", response)
     }
 
@@ -365,8 +386,21 @@ internal class QqBotOpenApiClient(
         )
     }
 
-    private fun authorizedHeaders(): Map<String, String> {
+    private fun authorizedRequest(
+        request: (Map<String, String>) -> QqBotHttpResponse,
+    ): QqBotHttpResponse {
         val token = accessToken()
+        var response = request(authorizedHeaders(token))
+        if (response.statusCode == HTTP_UNAUTHORIZED) {
+            synchronized(tokenLock) {
+                if (cachedToken?.value == token.value) cachedToken = null
+            }
+            response = request(authorizedHeaders(accessToken()))
+        }
+        return response
+    }
+
+    private fun authorizedHeaders(token: QqBotAccessToken): Map<String, String> {
         return mapOf(
             "Accept" to "application/json",
             "Authorization" to qqBotAuthorization(token.value),
@@ -447,6 +481,7 @@ internal class QqBotOpenApiClient(
                 statusCode = response.statusCode,
                 message = "响应缺少 id",
                 body = response.body,
+                outcomeUnknownFlag = true,
             )
         }
         return QqBotSendReceipt(
@@ -490,6 +525,8 @@ internal class QqBotOpenApiClient(
         private const val DEFAULT_UPLOAD_CONCURRENCY: Int = 1
         private const val DEFAULT_UPLOAD_RETRY_TIMEOUT_SECONDS: Long = 300L
         private const val DEFAULT_UPLOAD_RETRY_DELAY_SECONDS: Long = 1L
+        private const val MEDIA_PREPARE_TIMEOUT_SECONDS: Long = 60L
+        private const val HTTP_UNAUTHORIZED: Int = 401
 
         private val json = Json {
             ignoreUnknownKeys = true
@@ -588,6 +625,7 @@ internal class QqBotOpenApiException(
     val code: String? = null,
     override val message: String,
     val body: String,
+    val outcomeUnknownFlag: Boolean = false,
 ) : RuntimeException(
     buildString {
         append(action)
@@ -627,7 +665,7 @@ internal class QqBotOpenApiException(
 
     /** 官方明示"发送异常，请稍后重试"的码：无法确认服务器是否已受理，按状态未知处理。 */
     val outcomeUnknown: Boolean
-        get() = code in setOf("50055001", "50055002", "50055006")
+        get() = outcomeUnknownFlag || code in setOf("50055001", "50055002", "50055006")
 
     /** 上传/下载通道的临时故障：官方建议重试。 */
     val transientUploadFailure: Boolean
@@ -636,6 +674,13 @@ internal class QqBotOpenApiException(
 
 internal interface QqBotHttpTransport {
     fun postJson(url: String, headers: Map<String, String>, body: String): QqBotHttpResponse
+
+    fun postJsonWithTimeout(
+        url: String,
+        headers: Map<String, String>,
+        body: String,
+        timeout: Duration,
+    ): QqBotHttpResponse = postJson(url, headers, body)
 
     fun get(url: String, headers: Map<String, String>): QqBotHttpResponse
 
@@ -656,7 +701,16 @@ internal class QqBotJdkHttpTransport(
         .build(),
 ) : QqBotHttpTransport {
     override fun postJson(url: String, headers: Map<String, String>, body: String): QqBotHttpResponse {
-        val request = baseRequest(url, headers)
+        return postJsonWithTimeout(url, headers, body, Duration.ofSeconds(10))
+    }
+
+    override fun postJsonWithTimeout(
+        url: String,
+        headers: Map<String, String>,
+        body: String,
+        timeout: Duration,
+    ): QqBotHttpResponse {
+        val request = baseRequest(url, headers, timeout)
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(body))
             .build()
@@ -685,9 +739,13 @@ internal class QqBotJdkHttpTransport(
         return send(request)
     }
 
-    private fun baseRequest(url: String, headers: Map<String, String>): HttpRequest.Builder {
+    private fun baseRequest(
+        url: String,
+        headers: Map<String, String>,
+        timeout: Duration = Duration.ofSeconds(10),
+    ): HttpRequest.Builder {
         return HttpRequest.newBuilder(URI.create(url))
-            .timeout(Duration.ofSeconds(10))
+            .timeout(timeout)
             .apply {
                 headers.forEach { (name, value) -> header(name, value) }
             }
@@ -702,6 +760,55 @@ internal class QqBotJdkHttpTransport(
     }
 }
 
+
+/**
+ * 主动消息按官方保守下限限速：单聊未认证 30 QPM，群聊未认证 30 QPM。
+ * 被动回复不走这里，因为它受独立的回复窗口和次数限制。
+ */
+internal class QqBotMessageRateLimiter(
+    private val globalIntervalMillis: Long = 2_100L,
+    private val targetIntervalMillis: Long = 3_100L,
+    private val nowMillis: () -> Long = { System.currentTimeMillis() },
+    private val sleepMillis: (Long) -> Unit = { Thread.sleep(it) },
+) {
+    private companion object {
+        private const val MAX_TRACKED_TARGETS: Int = 1_024
+    }
+
+    private val lock = Any()
+    private var nextGlobalAllowedAtMillis: Long = 0L
+    private val nextTargetAllowedAtMillis: MutableMap<String, Long> = mutableMapOf()
+
+    /**
+     * 主动消息同时受 Bot 维度和单关系维度限制：未认证 Bot 30 QPM，单个用户/群 20 QPM。
+     * 在发送前预留两个时间点，避免并发发送绕过限流；被动回复不调用此方法。
+     */
+    fun acquire(scope: QqBotOpenApiScope) {
+        val waitMillis = synchronized(lock) {
+            val now = nowMillis()
+            val targetKey = "${scope.resource}:${scope.id}"
+            val nextTarget = nextTargetAllowedAtMillis[targetKey] ?: 0L
+            val wait = maxOf(
+                nextGlobalAllowedAtMillis - now,
+                nextTarget - now,
+            ).coerceAtLeast(0L)
+            nextGlobalAllowedAtMillis = maxOf(now, nextGlobalAllowedAtMillis) + globalIntervalMillis
+            nextTargetAllowedAtMillis[targetKey] = maxOf(now, nextTarget) + targetIntervalMillis
+            if (nextTargetAllowedAtMillis.size > MAX_TRACKED_TARGETS) {
+                nextTargetAllowedAtMillis.entries.removeIf { (_, deadline) -> deadline <= now }
+            }
+            wait
+        }
+        if (waitMillis > 0) {
+            try {
+                sleepMillis(waitMillis)
+            } catch (error: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw error
+            }
+        }
+    }
+}
 internal fun qqBotAuthorization(accessToken: String): String {
     val token = accessToken.trim()
     require(token.isNotBlank()) { "QQ 官方机器人访问令牌不能为空" }

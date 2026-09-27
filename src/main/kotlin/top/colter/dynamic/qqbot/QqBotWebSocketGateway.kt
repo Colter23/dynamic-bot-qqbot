@@ -1,15 +1,18 @@
 package top.colter.dynamic.qqbot
 
 import java.net.URI
+import java.nio.file.Files
 import java.net.http.HttpClient
 import java.net.http.WebSocket
 import java.time.Duration
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionException
 import java.util.concurrent.CompletionStage
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -34,6 +37,8 @@ internal class QqBotWebSocketGateway(
     private var webSocket: QqBotWebSocketSession? = null
 
     private val pendingGatewayTexts: MutableList<String> = mutableListOf()
+    private val mediaCache: MutableMap<MediaCacheKey, CachedMediaResource> = ConcurrentHashMap()
+    private val mediaFlights: MutableMap<MediaCacheKey, CompletableFuture<QqBotMediaResource>> = ConcurrentHashMap()
 
     @Volatile
     private var heartbeatTask: AutoCloseable? = null
@@ -183,6 +188,79 @@ internal class QqBotWebSocketGateway(
         scope: QqBotOpenApiScope,
         media: QqBotMediaResourceSource,
     ): QqBotMediaResource {
+        val key = media.cacheKey(scope)
+        val now = System.currentTimeMillis()
+        mediaCache[key]?.takeIf { it.expiresAtMillis > now }?.let { return it.resource }
+        val newFlight = CompletableFuture<QqBotMediaResource>()
+        val flight = mediaFlights.putIfAbsent(key, newFlight)
+        if (flight != null) return awaitMediaFlight(flight)
+
+        try {
+            val current = System.currentTimeMillis()
+            mediaCache[key]?.takeIf { it.expiresAtMillis > current }?.let {
+                newFlight.complete(it.resource)
+                return it.resource
+            }
+
+            val resource = resolveMediaResourceUncached(scope, media)
+            val ttlSeconds = resource.ttlSeconds
+            if (ttlSeconds != null && ttlSeconds >= 0L) {
+                val expiresAtMillis = if (ttlSeconds == 0L) {
+                    Long.MAX_VALUE
+                } else {
+                    current + ttlSeconds.minus(10L).coerceAtLeast(1L) * MILLIS_PER_SECOND
+                }
+                cacheMediaResource(
+                    key = key,
+                    resource = resource,
+                    expiresAtMillis = expiresAtMillis,
+                    nowMillis = current,
+                )
+            }
+            newFlight.complete(resource)
+            return resource
+        } catch (error: Throwable) {
+            newFlight.completeExceptionally(error)
+            throw error
+        } finally {
+            mediaFlights.remove(key, newFlight)
+        }
+    }
+
+    private fun awaitMediaFlight(flight: CompletableFuture<QqBotMediaResource>): QqBotMediaResource {
+        return try {
+            flight.join()
+        } catch (error: CompletionException) {
+            throw error.cause ?: error
+        }
+    }
+
+    private fun cacheMediaResource(
+        key: MediaCacheKey,
+        resource: QqBotMediaResource,
+        expiresAtMillis: Long,
+        nowMillis: Long,
+    ) {
+        mediaCache[key] = CachedMediaResource(resource, expiresAtMillis)
+        if (mediaCache.size <= MAX_MEDIA_CACHE_ENTRIES) return
+
+        mediaCache.entries.removeIf { entry ->
+            entry.key != key && entry.value.expiresAtMillis <= nowMillis
+        }
+        while (mediaCache.size > MAX_MEDIA_CACHE_ENTRIES) {
+            val evictedKey = mediaCache.keys.firstOrNull { it != key } ?: break
+            mediaCache.remove(evictedKey)
+        }
+    }
+
+    /**
+     * 把富媒体来源登记为 `file_info`：本地文件走分片上传，HTTP(S) 地址走 URL 转存。
+     * 本方法按目标和内容指纹做缓存/单飞；有效期未知的资源只在当前并发请求期间合并，之后不持久缓存。
+     */
+    private fun resolveMediaResourceUncached(
+        scope: QqBotOpenApiScope,
+        media: QqBotMediaResourceSource,
+    ): QqBotMediaResource {
         logger.debug {
             "QQ 官方机器人正在登记富媒体资源：scope=${scope.resource}/${scope.id} type=${media.fileType.label} source=${media.sourceLabel()}"
         }
@@ -208,6 +286,24 @@ internal class QqBotWebSocketGateway(
         return resource
     }
 
+    private fun QqBotMediaResourceSource.cacheKey(scope: QqBotOpenApiScope): MediaCacheKey {
+        val local = localFile
+        val source = if (local != null) {
+            val absolute = runCatching { local.toAbsolutePath().normalize().toString() }.getOrDefault(local.toString())
+            val size = runCatching { Files.size(local) }.getOrDefault(-1L)
+            val modified = runCatching { Files.getLastModifiedTime(local).toMillis() }.getOrDefault(-1L)
+            "file:$absolute:$size:$modified"
+        } else {
+            "url:${url?.trim().orEmpty()}"
+        }
+        return MediaCacheKey(
+            resource = scope.resource,
+            targetId = scope.id,
+            fileType = fileType,
+            source = source,
+            fileName = fileName?.trim().orEmpty(),
+        )
+    }
     override fun close() {
         closing = true
         incomingEventHandler = null
@@ -222,6 +318,10 @@ internal class QqBotWebSocketGateway(
             current
         }
         session?.close(1000, "插件停止")
+        mediaCache.clear()
+        mediaFlights.clear()
+        heartbeatScheduler.close()
+        reconnectScheduler.close()
         markUnavailable()
     }
 
@@ -229,6 +329,14 @@ internal class QqBotWebSocketGateway(
         val endpoint = openApiClient.gatewayBotEndpoint()
         // 官方限制：每个机器人创建的连接数不能超过 session_start_limit.remaining，
         // 用尽后继续重试只会白刷日志，因此按终态处理。
+        val shardCount = endpoint.shards?.coerceAtLeast(1) ?: 1
+        if (shardCount > 1) {
+            markUnavailable()
+            throw QqBotShardUnsupportedException(
+                "QQ 官方机器人建议使用 $shardCount 个 Shard，但当前插件仍是单连接模式，" +
+                    "为避免静默丢失事件已停止连接"
+            )
+        }
         val sessionLimit = endpoint.sessionStartLimit
         val remaining = sessionLimit?.remaining
         if (remaining != null && remaining <= 0) {
@@ -346,7 +454,7 @@ internal class QqBotWebSocketGateway(
             }
             markUnavailable()
             // 连接配额用尽是终态，重试只会白刷日志，交给调用点停止重连
-            if (error is QqBotConnectionQuotaExhaustedException) {
+            if (error is QqBotConnectionQuotaExhaustedException || error is QqBotShardUnsupportedException) {
                 logger.error { error.message.orEmpty() }
                 return@onFailure
             }
@@ -673,7 +781,21 @@ internal class QqBotWebSocketGateway(
     }
 }
 
+private data class MediaCacheKey(
+    val resource: String,
+    val targetId: String,
+    val fileType: QqBotMediaFileType,
+    val source: String,
+    val fileName: String,
+)
+
+private data class CachedMediaResource(
+    val resource: QqBotMediaResource,
+    val expiresAtMillis: Long,
+)
 private const val DEFAULT_MEDIA_FILE_NAME: String = "media"
+private const val MILLIS_PER_SECOND: Long = 1_000L
+private const val MAX_MEDIA_CACHE_ENTRIES: Int = 1_024
 
 /** 机器人资料（`GET /users/@me`）拉取失败后的重试冷却。 */
 private const val BOT_PROFILE_RETRY_MILLIS: Long = 10L * 60 * 1000
@@ -724,6 +846,7 @@ private fun terminalHint(statusCode: Int): String {
 
 /** 连接配额（`session_start_limit.remaining`）已用尽：重试无意义，属终态。 */
 private class QqBotConnectionQuotaExhaustedException(message: String) : IllegalStateException(message)
+private class QqBotShardUnsupportedException(message: String) : IllegalStateException(message)
 
 internal interface QqBotWebSocketConnector {
     fun connect(url: String, listener: QqBotWebSocketListener): QqBotWebSocketSession
@@ -793,16 +916,42 @@ internal class QqBotJdkWebSocketConnector(
 internal class QqBotJdkWebSocketSession(
     private val webSocket: WebSocket,
 ) : QqBotWebSocketSession {
+    private val sendLock = Any()
+    private var sendTail: CompletionStage<*> = CompletableFuture.completedFuture(null)
+
+    /**
+     * JDK WebSocket 的回调线程和心跳线程都可能发送载荷；用有序异步链保证顺序，
+     * 避免在这些线程上同步等待网络写入。
+     */
     override fun sendText(payload: String) {
-        webSocket.sendText(payload, true).join()
+        synchronized(sendLock) {
+            sendTail = sendTail
+                .handle { _, _ -> null }
+                .thenCompose {
+                    webSocket.sendText(payload, true).thenApply { null }
+                }
+                .also { stage ->
+                    stage.exceptionally { error ->
+                        logger.warn(error) { "QQ 官方机器人 WebSocket 载荷发送失败" }
+                        null
+                    }
+                }
+        }
     }
 
     override fun close(statusCode: Int, reason: String) {
-        runCatching { webSocket.sendClose(statusCode, reason).join() }
+        runCatching {
+            webSocket.sendClose(statusCode, reason)
+                .exceptionally { error ->
+                    logger.debug(error) { "QQ 官方机器人 WebSocket 关闭失败" }
+                    null
+                }
+        }
     }
 }
+internal interface QqBotHeartbeatScheduler : AutoCloseable {
+    override fun close() {}
 
-internal interface QqBotHeartbeatScheduler {
     fun scheduleAtFixedRate(
         initialDelayMillis: Long,
         intervalMillis: Long,
@@ -828,9 +977,15 @@ internal class ExecutorQqBotHeartbeatScheduler(
         )
         return AutoCloseable { future.cancel(false) }
     }
+
+    override fun close() {
+        executor.shutdownNow()
+    }
 }
 
-internal interface QqBotReconnectScheduler {
+internal interface QqBotReconnectScheduler : AutoCloseable {
+    override fun close() {}
+
     fun schedule(delayMillis: Long, task: () -> Unit): AutoCloseable
 }
 
@@ -846,5 +1001,9 @@ internal class ExecutorQqBotReconnectScheduler(
             TimeUnit.MILLISECONDS,
         )
         return AutoCloseable { future.cancel(false) }
+    }
+
+    override fun close() {
+        executor.shutdownNow()
     }
 }

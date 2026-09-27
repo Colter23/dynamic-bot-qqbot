@@ -125,6 +125,24 @@ class QqBotMessageMapperTest {
     }
 
     @Test
+    fun `被动回复超过平台限制时超出部分改为主动消息`() {
+        val plan = (1..6).map { index ->
+            QqBotSendPlanItem.Text(
+                QqBotSendRequest(
+                    content = "第${index}条",
+                    replyToMessageId = "source-msg",
+                    msgSeq = index,
+                ),
+            )
+        }
+
+        val limited = plan.limitPassiveReplies(maxReplies = 5)
+
+        assertEquals(listOf("source-msg", "source-msg", "source-msg", "source-msg", "source-msg", null), limited.map { it.request.replyToMessageId })
+        assertEquals(listOf(1, 2, 3, 4, 5, 6), limited.map { it.request.msgSeq })
+    }
+
+    @Test
     fun `发送计划保留批次图文边界`() {
         val plan = QqBotMessageMapper.toSendPlan(
             batches = listOf(

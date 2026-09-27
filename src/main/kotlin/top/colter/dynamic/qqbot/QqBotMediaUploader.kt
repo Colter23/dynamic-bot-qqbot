@@ -6,6 +6,14 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
+import top.colter.dynamic.core.tools.loggerFor
+import java.io.IOException
+import java.net.http.HttpTimeoutException
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+
+private val mediaLogger = loggerFor<QqBotMediaUploader>()
 
 internal data class QqBotFileHashes(
     val sizeBytes: Long,
@@ -90,31 +98,31 @@ internal class QqBotMediaUploader(
                 md5Prefix = hashes.md5Prefix,
             ),
         )
-
-        var offset = 0L
-        FileChannel.open(path, StandardOpenOption.READ).use { channel ->
-            ticket.parts.forEach { part ->
-                require(part.blockSizeBytes in 1..MAX_PART_BYTES) {
-                    "QQ 官方机器人分片大小超出支持范围：index=${part.index} size=${part.blockSizeBytes}"
-                }
-                val bytes = channel.readBytes(offset, part.blockSizeBytes)
-                require(bytes.isNotEmpty()) { "QQ 官方机器人分片读取为空：index=${part.index}" }
-                client.putUploadPart(part.presignedUrl, bytes)
-                client.finishUploadPart(
-                    scope = scope,
-                    request = QqBotUploadPartFinishRequest(
-                        uploadId = ticket.uploadId,
-                        partIndex = part.index,
-                        blockSizeBytes = bytes.size.toLong(),
-                        md5 = QqBotFileHasher.md5(bytes),
-                    ),
-                )
-                offset += bytes.size
-            }
+        val chunks = buildChunks(ticket, hashes.sizeBytes)
+        val concurrency = ticket.concurrency.coerceIn(1, chunks.size.coerceAtLeast(1))
+        val executor = Executors.newFixedThreadPool(concurrency) { runnable ->
+            Thread(runnable, "qqbot-media-upload").apply { isDaemon = true }
         }
-        // 分片必须完整覆盖整个文件；服务端若下发空洞或跳片（如秒传），继续合并会上传不完整数据
-        require(offset == hashes.sizeBytes) {
-            "QQ 官方机器人分片未覆盖整个文件：expected=${hashes.sizeBytes} uploaded=$offset parts=${ticket.parts.size}"
+        try {
+            val futures = chunks.map { chunk ->
+                executor.submit {
+                    uploadChunkWithRetry(scope, ticket, path, chunk)
+                }
+            }
+            futures.forEach { future ->
+                try {
+                    future.get()
+                } catch (error: ExecutionException) {
+                    throw error.cause ?: error
+                }
+            }
+        } finally {
+            executor.shutdownNow()
+            try {
+                executor.awaitTermination(5, TimeUnit.SECONDS)
+            } catch (error: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
         }
 
         return client.prepareMedia(
@@ -127,6 +135,89 @@ internal class QqBotMediaUploader(
         )
     }
 
+    private fun buildChunks(ticket: QqBotUploadTicket, fileSizeBytes: Long): List<QqBotUploadChunk> {
+        var offset = 0L
+        val chunks = ticket.parts.mapNotNull { part ->
+            require(part.blockSizeBytes in 1..MAX_PART_BYTES) {
+                "QQ 官方机器人分片大小超出支持范围：index=${part.index} size=${part.blockSizeBytes}"
+            }
+            if (offset >= fileSizeBytes) return@mapNotNull null
+            val sizeBytes = minOf(part.blockSizeBytes, fileSizeBytes - offset)
+            QqBotUploadChunk(part = part, offset = offset, sizeBytes = sizeBytes).also {
+                offset += sizeBytes
+            }
+        }
+        require(offset == fileSizeBytes) {
+            "QQ 官方机器人分片未覆盖整个文件：expected=$fileSizeBytes planned=$offset parts=${ticket.parts.size}"
+        }
+        return chunks
+    }
+
+    private fun uploadChunkWithRetry(
+        scope: QqBotOpenApiScope,
+        ticket: QqBotUploadTicket,
+        path: Path,
+        chunk: QqBotUploadChunk,
+    ) {
+        val deadline = System.nanoTime() + ticket.retryTimeoutSeconds.coerceAtLeast(0L) * NANOS_PER_SECOND
+        var attempt = 0
+        while (true) {
+            try {
+                FileChannel.open(path, StandardOpenOption.READ).use { channel ->
+                    val bytes = channel.readBytes(chunk.offset, chunk.sizeBytes)
+                    require(bytes.size.toLong() == chunk.sizeBytes) {
+                        "QQ 官方机器人分片读取大小不符：index=${chunk.part.index} expected=${chunk.sizeBytes} actual=${bytes.size}"
+                    }
+                    client.putUploadPart(chunk.part.presignedUrl, bytes)
+                    client.finishUploadPart(
+                        scope = scope,
+                        request = QqBotUploadPartFinishRequest(
+                            uploadId = ticket.uploadId,
+                            partIndex = chunk.part.index,
+                            blockSizeBytes = bytes.size.toLong(),
+                            md5 = QqBotFileHasher.md5(bytes),
+                        ),
+                    )
+                }
+                return
+            } catch (error: Throwable) {
+                if (error is InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw error
+                }
+                val remaining = deadline - System.nanoTime()
+                if (remaining <= 0L || !isRetryableUploadFailure(error)) throw error
+                attempt += 1
+                val delayMillis = ticket.retryDelaySeconds.coerceAtLeast(1L) * MILLIS_PER_SECOND
+                val sleepMillis = minOf(delayMillis, (remaining / NANOS_PER_MILLISECOND).coerceAtLeast(1L))
+                mediaLogger.warn(error) {
+                    "QQ 官方机器人分片上传失败，将重试：index=${chunk.part.index} attempt=$attempt delayMs=$sleepMillis"
+                }
+                try {
+                    Thread.sleep(sleepMillis)
+                } catch (error: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw error
+                }
+            }
+        }
+    }
+
+    private fun isRetryableUploadFailure(error: Throwable): Boolean {
+        val api = generateSequence(error) { it.cause }
+            .filterIsInstance<QqBotOpenApiException>()
+            .firstOrNull()
+        if (api != null) {
+            return api.retryable && (
+                api.transientUploadFailure ||
+                    api.statusCode == 429 ||
+                    api.statusCode >= 500
+                )
+        }
+        return generateSequence(error) { it.cause }.any {
+            it is IOException || it is HttpTimeoutException
+        }
+    }
     private fun FileChannel.readBytes(offset: Long, sizeBytes: Long): ByteArray {
         val length = sizeBytes.coerceAtMost(MAX_PART_BYTES).toInt()
         val buffer = ByteBuffer.allocate(length)
@@ -144,7 +235,16 @@ internal class QqBotMediaUploader(
 
     private companion object {
         private const val MAX_PART_BYTES: Long = 32L * 1024 * 1024
+        private const val MILLIS_PER_SECOND: Long = 1_000L
+        private const val NANOS_PER_SECOND: Long = 1_000_000_000L
+        private const val NANOS_PER_MILLISECOND: Long = 1_000_000L
     }
+
+    private data class QqBotUploadChunk(
+        val part: QqBotUploadPart,
+        val offset: Long,
+        val sizeBytes: Long,
+    )
 }
 
 private fun ByteArray.toHex(): String = joinToString("") { byte -> "%02x".format(byte) }

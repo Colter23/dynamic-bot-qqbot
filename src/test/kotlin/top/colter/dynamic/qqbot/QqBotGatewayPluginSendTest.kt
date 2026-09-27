@@ -48,6 +48,31 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
+    fun `群聊被动回复超过五条后剩余消息改为主动消息`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendMessage(
+            request = sendRequest(
+                target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
+                batches = (1..6).map { index ->
+                    MessageBatch(listOf(MessageContent.Text("第${index}条")))
+                },
+                replyToMessageId = "source-msg",
+            ),
+            routeId = "qqbot:qq-official:app-id",
+        )
+
+        assertIs<MessageSendResult.Sent>(result)
+        assertEquals(
+            listOf("source-msg", "source-msg", "source-msg", "source-msg", "source-msg", null),
+            gateway.sentRequests.map { it.replyToMessageId },
+        )
+    }
+
+    @Test
     fun `普通发送群聊图片 URL 走富媒体消息`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway()

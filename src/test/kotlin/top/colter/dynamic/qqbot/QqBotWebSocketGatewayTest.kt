@@ -3,6 +3,11 @@ package top.colter.dynamic.qqbot
 import java.net.http.HttpTimeoutException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.int
@@ -353,6 +358,116 @@ class QqBotWebSocketGatewayTest {
         val sendBody = Json.parseToJsonElement(transport.posts[2].body).jsonObject
         assertEquals(7, sendBody.getValue("msg_type").jsonPrimitive.int)
         assertEquals("file-info-1", sendBody.getValue("media").jsonObject.getValue("file_info").jsonPrimitive.content)
+    }
+
+    @Test
+    fun `同一目标同一媒体在有效期内复用 file_info`() = runTest {
+        val connector = FakeQqBotWebSocketConnector()
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}"""),
+                    QqBotHttpResponse(200, """{"file_info":"file-info-1","ttl":3600}"""),
+                    QqBotHttpResponse(200, """{"id":"group-media-send-1"}"""),
+                    QqBotHttpResponse(200, """{"id":"group-media-send-2"}"""),
+                ),
+            ),
+            getResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"url":"wss://api.bot.qq.com/websocket","shards":1}""")),
+            ),
+        )
+        val gateway = testGateway(connector = connector, transport = transport)
+        val media = QqBotMediaResourceSource(QqBotMediaFileType.IMAGE, url = "https://example.com/a.png")
+        val request = QqBotSendRequest(
+            content = "图片说明",
+            msgType = QQBOT_MEDIA_MSG_TYPE,
+            replyToMessageId = "source-msg",
+        )
+
+        gateway.connect { }
+        connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        connector.listener.onText("""{"op":0,"s":88,"t":"READY","d":{"session_id":"session-a"}}""")
+
+        gateway.sendGroupMediaMessage("app-id", "group-openid", media, request)
+        gateway.sendGroupMediaMessage("app-id", "group-openid", media, request)
+
+        assertEquals(1, transport.posts.count { it.url.endsWith("/files") })
+        assertEquals(2, transport.posts.count { it.url.endsWith("/messages") })
+    }
+
+    @Test
+    fun `同一目标同一媒体并发登记只调用一次文件接口`() = runTest {
+        val fileStarted = CountDownLatch(1)
+        val releaseFile = CountDownLatch(1)
+        val connector = FakeQqBotWebSocketConnector()
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(
+                    QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}"""),
+                    QqBotHttpResponse(200, """{"file_info":"file-info-1","ttl":3600}"""),
+                    QqBotHttpResponse(200, """{"file_info":"file-info-2","id":"group-media-send-0","ttl":3600}"""),
+                    QqBotHttpResponse(200, """{"id":"group-media-send-1"}"""),
+                    QqBotHttpResponse(200, """{"id":"group-media-send-2"}"""),
+                ),
+            ),
+            getResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"url":"wss://api.bot.qq.com/websocket","shards":1}""")),
+            ),
+            beforePost = { url ->
+                if (url.endsWith("/files")) {
+                    fileStarted.countDown()
+                    check(releaseFile.await(5, TimeUnit.SECONDS))
+                }
+            },
+        )
+        val gateway = testGateway(connector = connector, transport = transport)
+        val media = QqBotMediaResourceSource(QqBotMediaFileType.IMAGE, url = "https://example.com/a.png")
+        val request = QqBotSendRequest(
+            content = "图片说明",
+            msgType = QQBOT_MEDIA_MSG_TYPE,
+            replyToMessageId = "source-msg",
+        )
+
+        gateway.connect { }
+        connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        connector.listener.onText("""{"op":0,"s":88,"t":"READY","d":{"session_id":"session-a"}}""")
+
+        val first = async(Dispatchers.IO) {
+            gateway.sendGroupMediaMessage("app-id", "group-openid", media, request)
+        }
+        check(fileStarted.await(5, TimeUnit.SECONDS))
+        val second = async(Dispatchers.IO) {
+            gateway.sendGroupMediaMessage("app-id", "group-openid", media, request)
+        }
+        delay(100)
+        releaseFile.countDown()
+
+        first.await()
+        second.await()
+
+        assertEquals(1, transport.posts.count { it.url.endsWith("/files") })
+        assertEquals(2, transport.posts.count { it.url.endsWith("/messages") })
+    }
+
+    @Test
+    fun `多 Shard 接入点明确拒绝单连接模式`() = runTest {
+        val connector = FakeQqBotWebSocketConnector()
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
+            ),
+            getResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"url":"wss://api.bot.qq.com/websocket","shards":2}""")),
+            ),
+        )
+        val gateway = testGateway(connector = connector, transport = transport)
+
+        val error = assertFailsWith<IllegalStateException> {
+            gateway.connect { }
+        }
+
+        assertEquals(true, error.message.orEmpty().contains("单连接模式"))
+        assertEquals(emptyList(), connector.connectedUrls)
     }
 
     @Test
@@ -732,6 +847,7 @@ class QqBotWebSocketGatewayTest {
         private val putResponses: ArrayDeque<QqBotHttpResponse> = ArrayDeque(),
         private val postExceptionAtCallIndex: Int? = null,
         private val postException: Throwable? = null,
+        private val beforePost: ((String) -> Unit)? = null,
     ) : QqBotHttpTransport {
         val posts: MutableList<RecordedPost> = mutableListOf()
         val gets: MutableList<RecordedGet> = mutableListOf()
@@ -740,12 +856,15 @@ class QqBotWebSocketGatewayTest {
         private var postCallIndex: Int = 0
 
         override fun postJson(url: String, headers: Map<String, String>, body: String): QqBotHttpResponse {
-            posts += RecordedPost(url = url, headers = headers, body = body)
-            val callIndex = postCallIndex++
+            val callIndex = synchronized(this) {
+                posts += RecordedPost(url = url, headers = headers, body = body)
+                postCallIndex++
+            }
+            beforePost?.invoke(url)
             if (callIndex == postExceptionAtCallIndex) {
                 throw requireNotNull(postException) { "postException must be set when an exception index is configured" }
             }
-            return postResponses.removeFirst()
+            return synchronized(this) { postResponses.removeFirst() }
         }
 
         override fun get(url: String, headers: Map<String, String>): QqBotHttpResponse {

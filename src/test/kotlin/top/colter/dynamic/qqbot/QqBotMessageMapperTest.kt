@@ -209,6 +209,75 @@ class QqBotMessageMapperTest {
         assertEquals(true, textItem.request.content.contains("@全体成员"))
     }
 
+    @Test
+    fun `群聊文本消息的 MentionAll 使用官方 at-everyone 语法`() {
+        val plan = QqBotMessageMapper.toSendPlan(
+            batches = listOf(
+                MessageBatch(
+                    listOf(
+                        MessageContent.Text("新动态来了"),
+                        MessageContent.MentionAll(fallbackText = ""),
+                    ),
+                ),
+            ),
+            mentionAllAllowed = true,
+        )
+
+        val textItem = assertIs<QqBotSendPlanItem.Text>(plan.single())
+        assertEquals(true, textItem.request.content.contains("<qqbot-at-everyone />"))
+        assertFalse(textItem.request.content.contains("@全体成员"))
+        assertEquals(QQBOT_TEXT_MSG_TYPE, textItem.request.msgType)
+    }
+
+    @Test
+    fun `富媒体批次的 MentionAll 抽成独立文本消息`() {
+        val plan = QqBotMessageMapper.toSendPlan(
+            batches = listOf(
+                MessageBatch(
+                    listOf(
+                        MessageContent.Image(
+                            fallbackText = "",
+                            image = MediaRef(uri = "https://example.com/a.png", kind = MediaKind.IMAGE),
+                        ),
+                        MessageContent.Text("\n发布了新动态"),
+                        MessageContent.MentionAll(fallbackText = ""),
+                    ),
+                ),
+            ),
+            mentionAllAllowed = true,
+        )
+
+        assertEquals(2, plan.size)
+        val mediaItem = assertIs<QqBotSendPlanItem.Media>(plan[0])
+        assertEquals(QQBOT_MEDIA_MSG_TYPE, mediaItem.request.msgType)
+        assertFalse(mediaItem.request.content.contains("qqbot-at-everyone"))
+
+        val atAllItem = assertIs<QqBotSendPlanItem.Text>(plan[1])
+        assertEquals(QQBOT_TEXT_MSG_TYPE, atAllItem.request.msgType)
+        assertEquals("<qqbot-at-everyone />", atAllItem.request.content)
+    }
+
+    @Test
+    fun `一条消息里的多个 MentionAll 只有第一个使用官方语法`() {
+        val plan = QqBotMessageMapper.toSendPlan(
+            batches = listOf(
+                MessageBatch(
+                    listOf(
+                        MessageContent.Text("通知"),
+                        MessageContent.MentionAll(fallbackText = ""),
+                        MessageContent.Text("\n"),
+                        MessageContent.MentionAll(fallbackText = ""),
+                    ),
+                ),
+            ),
+            mentionAllAllowed = true,
+        )
+
+        val content = assertIs<QqBotSendPlanItem.Text>(plan.single()).request.content
+        assertEquals(1, Regex(Regex.escape(QQBOT_MENTION_ALL_SYNTAX)).findAll(content).count())
+        assertTrue(content.contains("@全体成员"))
+    }
+
     private fun createTempImage(): Path {
         val dir = Files.createTempDirectory("qqbot-mapper-test")
         val file = dir.resolve("image.png")

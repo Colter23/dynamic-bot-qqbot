@@ -148,14 +148,24 @@ internal object QqBotMessageMapper {
         )
     }
 
+    /**
+     * 把消息批次转换成 QQ 发送计划。
+     *
+     * [mentionAllAllowed] 为 true 表示本次允许真正使用官方的 `<qqbot-at-everyone />`：
+     * 只有群聊目标、且本地每日配额尚未用过时才会传 true。默认 false 保持旧行为
+     * （降级为纯文本 `@全体成员`）。
+     */
     fun toSendPlan(
         batches: List<MessageBatch>,
         replyToMessageId: String? = null,
+        mentionAllAllowed: Boolean = false,
     ): List<QqBotSendPlanItem> {
         val normalizedReplyTo = replyToMessageId?.trim()?.takeIf { it.isNotBlank() }
             ?: batches.firstReplyMessageId()
         val items = mutableListOf<QqBotSendPlanItem>()
         var nextMsgSeq = 1
+        // 平台限制每群每天只能 @ 全体成员 1 次：一条消息里出现多个时只保留第一个。
+        var mentionAllEmitted = false
 
         fun nextRequest(content: String, msgType: Int): QqBotSendRequest {
             val normalizedContent = if (msgType == QQBOT_MEDIA_MSG_TYPE) {
@@ -172,14 +182,17 @@ internal object QqBotMessageMapper {
         }
 
         batches.forEach { batch ->
-            val mediaCandidates = mutableListOf<QqBotBatchMediaCandidate>()
+            // 一次预扫描同时拿到媒体候选与"该批次最终是否会发成富媒体消息"：
+            // 富媒体消息（msg_type=7）不支持 @全体成员，标签必须抽成独立的文本消息。
+            val contentItems = batch.content.map { content -> content to content.toMediaCandidate() }
+            val mediaCandidates = contentItems.mapNotNull { (_, media) -> media }
+            val hasSendableMedia = mediaCandidates.any { it.source != null }
             val textParts = mutableListOf<String>()
+            var pendingMentionAll = false
 
-            batch.content.forEach { content ->
-                val media = content.toMediaCandidate()
+            contentItems.forEach { (content, media) ->
                 when {
                     media != null -> {
-                        mediaCandidates += media
                         if (media.source == null) {
                             textParts += media.fallbackText.ifBlank {
                                 "（暂不支持发送${media.fileType.label}，请使用 HTTP(S) URL 或本地文件）"
@@ -193,9 +206,18 @@ internal object QqBotMessageMapper {
                         textParts += content.mentionSyntax(content.target.externalId)
                             .takeIf { it.isNotBlank() } ?: content.fallbackText
                     }
-                    // 官方群聊不支持 @全体成员：降级为纯文本，避免静默丢失
                     content is MessageContent.MentionAll -> {
-                        textParts += content.fallbackText.ifBlank { QQBOT_MENTION_ALL_FALLBACK }
+                        if (mentionAllAllowed && !mentionAllEmitted) {
+                            mentionAllEmitted = true
+                            if (hasSendableMedia) {
+                                // 不能写进富媒体消息的内容里，稍后单独补一条文本消息
+                                pendingMentionAll = true
+                            } else {
+                                textParts += QQBOT_MENTION_ALL_SYNTAX
+                            }
+                        } else {
+                            textParts += content.fallbackText.ifBlank { QQBOT_MENTION_ALL_FALLBACK }
+                        }
                     }
                     else -> textParts += content.fallbackText
                 }
@@ -225,6 +247,13 @@ internal object QqBotMessageMapper {
                     }
             } else if (text.isNotBlank()) {
                 items += QqBotSendPlanItem.Text(nextRequest(content = text, msgType = QQBOT_TEXT_MSG_TYPE))
+            }
+
+            if (pendingMentionAll) {
+                // 独立文本消息，接在该批次之后；平台只允许文本/markdown 消息承载 @全体成员
+                items += QqBotSendPlanItem.Text(
+                    nextRequest(content = QQBOT_MENTION_ALL_SYNTAX, msgType = QQBOT_TEXT_MSG_TYPE),
+                )
             }
         }
 
@@ -735,5 +764,10 @@ internal val QQBOT_MESSAGE_EVENT_TYPES: Set<String> = setOf(
     QQBOT_GROUP_MESSAGE_CREATE,
 )
 private const val QQBOT_EMPTY_MESSAGE_TEXT: String = "（空消息）"
-private const val QQBOT_MENTION_ALL_FALLBACK: String = "@全体成员"
+
+/** 官方群聊 @全体成员 的内嵌文本语法；只在文本/markdown 消息中生效，每群每天 1 次。 */
+internal const val QQBOT_MENTION_ALL_SYNTAX: String = "<qqbot-at-everyone />"
+
+/** 不能真正 @ 时的纯文本降级内容，同时用作被平台拒绝后的重发文本。 */
+internal const val QQBOT_MENTION_ALL_FALLBACK: String = "@全体成员"
 private val QQBOT_OFFICIAL_MENTION_PATTERN: Regex = Regex("""<@([^>]+)>""")

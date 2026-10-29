@@ -5,8 +5,10 @@ import java.nio.file.Path
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import top.colter.dynamic.core.data.MediaKind
 import top.colter.dynamic.core.data.MediaRef
 import top.colter.dynamic.core.data.Message
@@ -600,6 +602,310 @@ class QqBotGatewayPluginSendTest {
         assertEquals(emptyList(), gateway.recallCalls)
     }
 
+    @Test
+    fun `群聊 MentionAll 使用官方 at-everyone 语法`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendMessage(
+            request = sendRequest(
+                target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
+                batches = listOf(
+                    MessageBatch(
+                        listOf(
+                            MessageContent.Text("开播了"),
+                            MessageContent.MentionAll(fallbackText = ""),
+                        ),
+                    ),
+                ),
+            ),
+            routeId = "qqbot:qq-official:app-id",
+        )
+
+        assertIs<MessageSendResult.Sent>(result)
+        val sent = gateway.sentRequests.single()
+        assertTrue(sent.content.contains("<qqbot-at-everyone />"))
+        assertFalse(sent.content.contains("@全体成员"))
+        assertEquals(QQBOT_TEXT_MSG_TYPE, sent.msgType)
+    }
+
+    @Test
+    fun `单聊 MentionAll 仍降级为纯文本`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendMessage(
+            request = sendRequest(
+                target = TargetAddress.of("qq-official", TargetKind.USER, "user-openid"),
+                batches = listOf(
+                    MessageBatch(
+                        listOf(
+                            MessageContent.Text("开播了"),
+                            MessageContent.MentionAll(fallbackText = ""),
+                        ),
+                    ),
+                ),
+            ),
+            routeId = "qqbot:qq-official:app-id",
+        )
+
+        assertIs<MessageSendResult.Sent>(result)
+        val sent = gateway.sentRequests.single()
+        assertFalse(sent.content.contains("qqbot-at-everyone"))
+        assertTrue(sent.content.contains("@全体成员"))
+    }
+
+    @Test
+    fun `富媒体批次的 MentionAll 单独补发文本消息`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendMessage(
+            request = sendRequest(
+                target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
+                batches = listOf(
+                    MessageBatch(
+                        listOf(
+                            MessageContent.Image(
+                                fallbackText = "",
+                                image = MediaRef(uri = "https://example.com/a.png", kind = MediaKind.IMAGE),
+                            ),
+                            MessageContent.Text("\n发布了新动态"),
+                            MessageContent.MentionAll(fallbackText = ""),
+                        ),
+                    ),
+                ),
+            ),
+            routeId = "qqbot:qq-official:app-id",
+        )
+
+        val sent = assertIs<MessageSendResult.Sent>(result)
+        assertEquals(listOf("group-media-send-1", "group-send-1"), sent.sinkMessageIds)
+        assertEquals(2, gateway.sentRequests.size)
+
+        val media = gateway.sentRequests[0]
+        assertEquals(QQBOT_MEDIA_MSG_TYPE, media.msgType)
+        assertFalse(media.content.contains("qqbot-at-everyone"))
+        assertTrue(media.content.contains("发布了新动态"))
+
+        val atAll = gateway.sentRequests[1]
+        assertEquals(QQBOT_TEXT_MSG_TYPE, atAll.msgType)
+        assertEquals("<qqbot-at-everyone />", atAll.content)
+    }
+
+    @Test
+    fun `同一群当天第二次 MentionAll 降级为纯文本`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val request = sendRequest(
+            target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
+            batches = listOf(
+                MessageBatch(
+                    listOf(
+                        MessageContent.Text("开播了"),
+                        MessageContent.MentionAll(fallbackText = ""),
+                    ),
+                ),
+            ),
+        )
+
+        plugin.sendMessage(request, routeId = "qqbot:qq-official:app-id")
+        plugin.sendMessage(request, routeId = "qqbot:qq-official:app-id")
+
+        assertEquals(2, gateway.sentRequests.size)
+        assertTrue(gateway.sentRequests[0].content.contains("<qqbot-at-everyone />"))
+        assertFalse(gateway.sentRequests[1].content.contains("qqbot-at-everyone"))
+        assertTrue(gateway.sentRequests[1].content.contains("@全体成员"))
+    }
+
+    @Test
+    fun `平台拒绝 at-everyone 时降级为纯文本重发`() = runBlocking {
+        listOf("304019", "1100304").forEach { code ->
+            val plugin = QqBotGatewayPlugin().prepareSendTest()
+            val gateway = FakeGateway(
+                failFirstGroupSend = QqBotOpenApiException(
+                    action = "发送 QQ 官方机器人消息",
+                    statusCode = 400,
+                    code = code,
+                    message = "@全体成员 发送失败",
+                    body = "",
+                ),
+            )
+            plugin.setPrivate("gateway", gateway)
+            plugin.setPrivate("running", true)
+
+            val result = plugin.sendMessage(
+                request = sendRequest(
+                    target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
+                    batches = listOf(
+                        MessageBatch(
+                            listOf(
+                                MessageContent.Text("开播了"),
+                                MessageContent.MentionAll(fallbackText = ""),
+                            ),
+                        ),
+                    ),
+                ),
+                routeId = "qqbot:qq-official:app-id",
+            )
+
+            assertIs<MessageSendResult.Sent>(result)
+            assertEquals(2, gateway.sentRequests.size)
+            assertTrue(gateway.sentRequests[0].content.contains("<qqbot-at-everyone />"))
+            assertFalse(gateway.sentRequests[1].content.contains("qqbot-at-everyone"))
+            assertTrue(gateway.sentRequests[1].content.contains("@全体成员"))
+        }
+    }
+
+    @Test
+    fun `at-everyone 降级重发时续编被动回复序号`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway(
+            failFirstGroupSend = QqBotOpenApiException(
+                action = "发送 QQ 官方机器人消息",
+                statusCode = 400,
+                code = "304019",
+                message = "@全体成员 次数超限",
+                body = "",
+            ),
+        )
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendMessage(
+            request = sendRequest(
+                target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
+                batches = listOf(
+                    MessageBatch(
+                        listOf(
+                            MessageContent.Text("开播了"),
+                            MessageContent.MentionAll(fallbackText = ""),
+                        ),
+                    ),
+                ),
+                replyToMessageId = "group-msg-1",
+            ),
+            routeId = "qqbot:qq-official:app-id",
+        )
+
+        assertIs<MessageSendResult.Sent>(result)
+        assertEquals(2, gateway.sentRequests.size)
+        assertEquals(listOf("group-msg-1", "group-msg-1"), gateway.sentRequests.map { it.replyToMessageId })
+        // 重发沿用同一 msg_id 时必须换 seq，否则会被官方去重
+        assertEquals(1, gateway.sentRequests[0].msgSeq)
+        assertEquals(2, gateway.sentRequests[1].msgSeq)
+    }
+
+    @Test
+    fun `at-everyone 遇到服务端 5xx 不降级重发`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway(
+            failFirstGroupSend = QqBotOpenApiException(
+                action = "发送 QQ 官方机器人消息",
+                statusCode = 500,
+                code = null,
+                message = "处理失败",
+                body = "",
+            ),
+        )
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendMessage(
+            request = sendRequest(
+                target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
+                batches = listOf(
+                    MessageBatch(
+                        listOf(
+                            MessageContent.Text("开播了"),
+                            MessageContent.MentionAll(fallbackText = ""),
+                        ),
+                    ),
+                ),
+            ),
+            routeId = "qqbot:qq-official:app-id",
+        )
+
+        // 5xx 时上游可能已受理，立即换成纯文本重发会有重复推送风险，仍按原有失败语义上报
+        val failed = assertIs<MessageSendResult.Failed>(result)
+        assertEquals(true, failed.retryable)
+        assertEquals(1, gateway.sentRequests.size)
+        assertTrue(gateway.sentRequests.single().content.contains("<qqbot-at-everyone />"))
+    }
+
+    @Test
+    fun `普通群消息不消耗 at-everyone 配额`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        plugin.sendMessage(
+            request = deliveryRequest(
+                TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
+                "普通消息",
+            ),
+            routeId = "qqbot:qq-official:app-id",
+        )
+        val result = plugin.sendMessage(
+            request = sendRequest(
+                target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
+                batches = listOf(
+                    MessageBatch(
+                        listOf(
+                            MessageContent.Text("开播了"),
+                            MessageContent.MentionAll(fallbackText = ""),
+                        ),
+                    ),
+                ),
+            ),
+            routeId = "qqbot:qq-official:app-id",
+        )
+
+        assertIs<MessageSendResult.Sent>(result)
+        assertEquals(2, gateway.sentRequests.size)
+        assertFalse(gateway.sentRequests[0].content.contains("qqbot-at-everyone"))
+        assertTrue(gateway.sentRequests[1].content.contains("<qqbot-at-everyone />"))
+    }
+
+    @Test
+    fun `at-everyone 发送超时不上报可重试也不重发`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway(
+            failFirstGroupSend = java.net.http.HttpTimeoutException("请求超时"),
+        )
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendMessage(
+            request = sendRequest(
+                target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
+                batches = listOf(
+                    MessageBatch(
+                        listOf(
+                            MessageContent.Text("开播了"),
+                            MessageContent.MentionAll(fallbackText = ""),
+                        ),
+                    ),
+                ),
+            ),
+            routeId = "qqbot:qq-official:app-id",
+        )
+
+        assertIs<MessageSendResult.Uncertain>(result)
+        assertEquals(1, gateway.sentRequests.size)
+        assertTrue(gateway.sentRequests.single().content.contains("<qqbot-at-everyone />"))
+    }
+
     private fun QqBotGatewayPlugin.prepareSendTest(): QqBotGatewayPlugin {
         setPrivate("config", QqBotConfig())
         return this
@@ -646,11 +952,13 @@ class QqBotGatewayPluginSendTest {
     private class FakeGateway(
         private val state: MessageSinkRouteState = MessageSinkRouteState.READY,
         private val avatar: MediaRef? = null,
+        private val failFirstGroupSend: Throwable? = null,
     ) : QqBotGateway {
         val sendCalls: MutableList<String> = mutableListOf()
         val sentRequests: MutableList<QqBotSendRequest> = mutableListOf()
         val mediaCalls: MutableList<QqBotMediaResourceSource> = mutableListOf()
         val recallCalls: MutableList<String> = mutableListOf()
+        private var groupSendAttempted: Boolean = false
 
         override suspend fun connect(onIncomingEvent: (QqBotIncomingEvent) -> Unit) {
         }
@@ -677,6 +985,10 @@ class QqBotGatewayPluginSendTest {
             request: QqBotSendRequest,
         ): QqBotSendReceipt {
             sentRequests += request
+            if (!groupSendAttempted) {
+                groupSendAttempted = true
+                failFirstGroupSend?.let { throw it }
+            }
             sendCalls += "$accountId:group:$groupOpenid:${request.content}"
             return QqBotSendReceipt(messageId = "group-send-1")
         }

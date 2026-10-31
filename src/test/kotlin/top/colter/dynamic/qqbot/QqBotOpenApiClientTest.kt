@@ -230,7 +230,20 @@ class QqBotOpenApiClientTest {
         limiter.acquire(QqBotOpenApiScope.Group("group-a"))
         limiter.acquire(QqBotOpenApiScope.Group("group-b"))
 
-        assertEquals(listOf(3_100L, 1_100L), sleeps)
+        assertEquals(listOf(3_100L, 2_100L), sleeps)
+    }
+
+    @Test
+    fun `并发预约按实际发送时间推进两个限流窗口`() {
+        val reservations = mutableListOf<Long>()
+        val limiter = QqBotMessageRateLimiter(
+            nowMillis = { 0L },
+            sleepMillis = reservations::add,
+        )
+        listOf("a", "a", "b", "b", "a").forEach { target ->
+            limiter.acquire(QqBotOpenApiScope.Group(target))
+        }
+        assertEquals(listOf(3_100L, 5_200L, 8_300L, 10_400L), reservations)
     }
 
     @Test

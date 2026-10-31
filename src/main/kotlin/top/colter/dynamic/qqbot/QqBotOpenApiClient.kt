@@ -790,12 +790,10 @@ internal class QqBotMessageRateLimiter(
             val now = nowMillis()
             val targetKey = "${scope.resource}:${scope.id}"
             val nextTarget = nextTargetAllowedAtMillis[targetKey] ?: 0L
-            val wait = maxOf(
-                nextGlobalAllowedAtMillis - now,
-                nextTarget - now,
-            ).coerceAtLeast(0L)
-            nextGlobalAllowedAtMillis = maxOf(now, nextGlobalAllowedAtMillis) + globalIntervalMillis
-            nextTargetAllowedAtMillis[targetKey] = maxOf(now, nextTarget) + targetIntervalMillis
+            val scheduledAt = maxOf(now, nextGlobalAllowedAtMillis, nextTarget)
+            val wait = scheduledAt - now
+            nextGlobalAllowedAtMillis = scheduledAt + globalIntervalMillis
+            nextTargetAllowedAtMillis[targetKey] = scheduledAt + targetIntervalMillis
             if (nextTargetAllowedAtMillis.size > MAX_TRACKED_TARGETS) {
                 nextTargetAllowedAtMillis.entries.removeIf { (_, deadline) -> deadline <= now }
             }

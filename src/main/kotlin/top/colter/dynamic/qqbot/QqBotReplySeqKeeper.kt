@@ -1,71 +1,51 @@
 package top.colter.dynamic.qqbot
 
-import java.util.concurrent.ConcurrentHashMap
+import top.colter.dynamic.core.data.TargetAddress
+import top.colter.dynamic.core.data.TargetKind
 
-/**
- * 被动回复重试时的 msg_seq 续编器。
- *
- * 官方按 `msg_id + msg_seq` 去重：同一 [msgId] 的重复请求需要递增 [msgSeq] 才会被接受。
- * 主项目对失败投递重试时会原样重发消息，这里记录每个 msg_id 已用过的最大 seq，
- * 让重试请求从"上次已用 + 1"开始，避免重试被官方去重规则直接拒绝。
- *
- * 仅在内存中维护：进程重启后主项目重发的请求可能重新从 1 开始，此时被动回复窗口
- * （单聊 60 分钟、群聊 5 分钟）大概率已过期，官方会返回可识别的终态错误码。
- */
+/** 同一账号、目标、入站消息共享被动回复配额与 msg_seq，包括重试和降级重发。 */
 internal class QqBotReplySeqKeeper(
     private val nowEpochMillis: () -> Long = { System.currentTimeMillis() },
-    private val windowMillis: Long = DEFAULT_WINDOW_MILLIS,
+    private val windowMillis: Long = 60L * 60 * 1000,
+    private val maxEntries: Int = 4_096,
 ) {
-    private val usedSeqByReplyId = ConcurrentHashMap<String, MutableMap<Int, Long>>()
-    private var lastPruneMillis: Long = 0L
+    private data class Key(val accountId: String, val target: String, val replyId: String)
+    private data class State(var nextSeq: Int, var remaining: Int, var lastUsed: Long)
 
-    /**
-     * 把发送计划中各请求的 msgSeq 改写为该回复 ID 下未用过的新值。
-     * 非被动回复（replyMessageId 为空）的计划原样返回。
-     */
-    fun advance(replyMessageId: String?, plan: List<QqBotSendPlanItem>): List<QqBotSendPlanItem> {
-        if (replyMessageId.isNullOrBlank()) return plan
-        val replyId = replyMessageId.trim()
+    private val states = LinkedHashMap<Key, State>()
+    private var lastPruneMillis: Long? = null
+
+    init {
+        require(windowMillis > 0)
+        require(maxEntries > 0)
+    }
+
+    /** 紧邻实际发送时预约，不为尚未发送的后续批次提前消耗配额。 */
+    @Synchronized
+    fun advance(accountId: String, target: TargetAddress, item: QqBotSendPlanItem): QqBotSendPlanItem {
+        val replyId = item.request.replyToMessageId?.trim()?.takeIf(String::isNotBlank) ?: return item
+        val limit = when (target.kind) {
+            TargetKind.USER -> 4
+            TargetKind.GROUP -> 5
+            else -> return item
+        }
         val now = nowEpochMillis()
-        pruneIfDue(now)
-
-        val used = usedSeqByReplyId.computeIfAbsent(replyId) { ConcurrentHashMap() }
-        return plan.map { item ->
-            val seq = allocateSeq(used, item.request.msgSeq, now)
-            if (seq == item.request.msgSeq) {
-                item
-            } else {
-                item.withRequest(item.request.copy(msgSeq = seq))
-            }
+        if (lastPruneMillis == null || now - lastPruneMillis!! >= windowMillis / 2) {
+            states.entries.removeIf { now - it.value.lastUsed > windowMillis }
+            lastPruneMillis = now
         }
+        val key = Key(accountId.trim(), target.stableValue(), replyId)
+        val state = states[key] ?: run {
+            // 容量耗尽时按主动消息处理，不淘汰仍有效的配额以免重复发放。
+            if (states.size >= maxEntries) return item.asActiveMessage()
+            State(nextSeq = 1, remaining = limit, lastUsed = now).also { states[key] = it }
+        }
+        state.lastUsed = now
+        if (state.remaining == 0) return item.asActiveMessage()
+        state.remaining--
+        return item.withRequest(item.request.copy(replyToMessageId = replyId, msgSeq = state.nextSeq++))
     }
 
-    private fun allocateSeq(
-        used: MutableMap<Int, Long>,
-        requestedSeq: Int,
-        now: Long,
-    ): Int {
-        var seq = requestedSeq
-        while (used.putIfAbsent(seq, now) != null) {
-            seq += 1
-        }
-        return seq
-    }
-
-    private fun pruneIfDue(now: Long) {
-        if (now - lastPruneMillis < windowMillis / 2 && lastPruneMillis != 0L) return
-        lastPruneMillis = now
-        usedSeqByReplyId.entries.removeIf { (_, used) ->
-            val latest = used.values.maxOrNull() ?: return@removeIf true
-            now - latest > windowMillis
-        }
-        usedSeqByReplyId.values.forEach { used ->
-            used.entries.removeIf { (_, atMillis) -> now - atMillis > windowMillis }
-        }
-    }
-
-    private companion object {
-        /** 被动回复窗口最长为单聊 60 分钟，超窗后重发必然收到过期错误码，记录无需更久。 */
-        private const val DEFAULT_WINDOW_MILLIS: Long = 60L * 60 * 1000
-    }
+    private fun QqBotSendPlanItem.asActiveMessage(): QqBotSendPlanItem =
+        withRequest(request.copy(replyToMessageId = null))
 }

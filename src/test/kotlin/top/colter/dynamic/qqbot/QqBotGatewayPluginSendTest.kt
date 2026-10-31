@@ -75,6 +75,67 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
+    fun `同一入站消息分多次投递时共享被动回复配额`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+        val target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid")
+        for (count in listOf(4, 2)) {
+            val result = plugin.sendMessage(sendRequest(
+                target = target,
+                batches = (1..count).map { MessageBatch(listOf(MessageContent.Text("回复$it"))) },
+                replyToMessageId = "source-msg",
+            ), routeId = "qqbot:qq-official:app-id")
+            assertIs<MessageSendResult.Sent>(result)
+        }
+
+        assertEquals(listOf("source-msg", "source-msg", "source-msg", "source-msg", "source-msg", null), gateway.sentRequests.map { it.replyToMessageId })
+        assertEquals(listOf(1, 2, 3, 4, 5), gateway.sentRequests.filter { it.replyToMessageId != null }.map { it.msgSeq })
+    }
+
+    @Test
+    fun `消息段中的回复目标也共享跨投递配额和序号`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+        val request = sendRequest(
+            target = TargetAddress.of("qq-official", TargetKind.USER, "user-openid"),
+            batches = listOf(MessageBatch(listOf(
+                MessageContent.Reply(fallbackText = "", messageId = "embedded-reply"),
+                MessageContent.Text("回复"),
+            ))),
+        )
+
+        repeat(5) { assertIs<MessageSendResult.Sent>(plugin.sendMessage(request, "qqbot:qq-official:app-id")) }
+
+        assertEquals(listOf("embedded-reply", "embedded-reply", "embedded-reply", "embedded-reply", null), gateway.sentRequests.map { it.replyToMessageId })
+        assertEquals(listOf(1, 2, 3, 4), gateway.sentRequests.filter { it.replyToMessageId != null }.map { it.msgSeq })
+    }
+
+    @Test
+    fun `at全体降级重发同样消耗共享配额但不预占未发送批次`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway(failFirstGroupSend = QqBotOpenApiException(
+            action = "send", statusCode = 400, code = "304019", message = "at rejected", body = "",
+        ))
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+        val request = sendRequest(
+            target = TargetAddress.of("qq-official", TargetKind.GROUP, "group-openid"),
+            batches = listOf(MessageBatch(listOf(MessageContent.Text("开播"), MessageContent.MentionAll(fallbackText = "")))) +
+                (1..4).map { MessageBatch(listOf(MessageContent.Text("后续$it"))) },
+            replyToMessageId = "source-msg",
+        )
+
+        assertIs<MessageSendResult.Sent>(plugin.sendMessage(request, "qqbot:qq-official:app-id"))
+
+        assertEquals(listOf("source-msg", "source-msg", "source-msg", "source-msg", "source-msg", null), gateway.sentRequests.map { it.replyToMessageId })
+        assertEquals(listOf(1, 2, 3, 4, 5), gateway.sentRequests.filter { it.replyToMessageId != null }.map { it.msgSeq })
+    }
+
+    @Test
     fun `普通发送群聊图片 URL 走富媒体消息`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway()

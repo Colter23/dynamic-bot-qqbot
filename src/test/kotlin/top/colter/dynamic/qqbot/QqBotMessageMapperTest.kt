@@ -13,6 +13,7 @@ import top.colter.dynamic.core.data.MediaRef
 import top.colter.dynamic.core.data.MessageBatch
 import top.colter.dynamic.core.data.MessageContent
 import top.colter.dynamic.core.data.TargetKind
+import top.colter.dynamic.core.data.TargetAddress
 
 class QqBotMessageMapperTest {
     @Test
@@ -136,7 +137,8 @@ class QqBotMessageMapperTest {
             )
         }
 
-        val limited = plan.limitPassiveReplies(maxReplies = 5)
+        val keeper = QqBotReplySeqKeeper()
+        val limited = plan.map { keeper.advance("app", TargetAddress.of("qq-official", TargetKind.GROUP, "group"), it) }
 
         assertEquals(listOf("source-msg", "source-msg", "source-msg", "source-msg", "source-msg", null), limited.map { it.request.replyToMessageId })
         assertEquals(listOf(1, 2, 3, 4, 5, 6), limited.map { it.request.msgSeq })

@@ -4,6 +4,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertTrue
+import top.colter.dynamic.core.plugin.CORE_PLUGIN_API_VERSION
 
 class PluginDescriptorTest {
     @Test
@@ -12,6 +13,6 @@ class PluginDescriptorTest {
 
         assertTrue(content.contains("id: qqbot-gateway"))
         assertTrue(content.contains("mainClass: top.colter.dynamic.qqbot.QqBotGatewayPlugin"))
-        assertTrue(content.contains("apiVersion: 3.0.0"))
+        assertTrue(content.contains("apiVersion: $CORE_PLUGIN_API_VERSION"))
     }
 }

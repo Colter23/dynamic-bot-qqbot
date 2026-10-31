@@ -56,23 +56,6 @@ internal fun QqBotSendPlanItem.withRequest(request: QqBotSendRequest): QqBotSend
     is QqBotSendPlanItem.Media -> copy(request = request)
 }
 
-/**
- * QQ 对同一条入站消息的被动回复次数有限：群聊最多 5 次，单聊最多 4 次。
- * 超出部分改为主动消息，避免整条消息在拆分后被平台拒绝。
- */
-internal fun List<QqBotSendPlanItem>.limitPassiveReplies(maxReplies: Int): List<QqBotSendPlanItem> {
-    var remaining = maxReplies.coerceAtLeast(0)
-    return map { item ->
-        if (item.request.replyToMessageId.isNullOrBlank()) {
-            item
-        } else if (remaining-- > 0) {
-            item
-        } else {
-            item.withRequest(item.request.copy(replyToMessageId = null))
-        }
-    }
-}
-
 internal data class QqBotSendReceipt(
     val messageId: String,
     val rawPayload: String = "",

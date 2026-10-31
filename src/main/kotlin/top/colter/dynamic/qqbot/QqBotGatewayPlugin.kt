@@ -192,7 +192,7 @@ public class QqBotGatewayPlugin :
         // 先占配额，同群当天后续推送直接降级为纯文本，避免发送必然被拒的请求。
         val mentionAllAllowed = reserveMentionAll(request, target)
         // 引用展示需要消息自身事件里的 msg_idx，主项目只给得出被动回复用的 d.id，故先补引用
-        val replyPlan = messageIndexKeeper.apply(
+        val plan = messageIndexKeeper.apply(
             replyToMessageId = request.replyToMessageId,
             plan = QqBotMessageMapper.toSendPlan(
                 batches = request.batches,
@@ -200,26 +200,13 @@ public class QqBotGatewayPlugin :
                 mentionAllAllowed = mentionAllAllowed,
             ),
         )
-        // 官方按 msg_id+msg_seq 去重被动回复；主项目重试时必须续编 seq，否则重试必然被去重拒绝
-        val plan = retryReplySeqKeeper.advance(request.replyToMessageId, replyPlan)
-        val limitedPlan = when (target) {
-            is QqBotTarget.User -> plan.limitPassiveReplies(QQBOT_USER_PASSIVE_REPLY_LIMIT)
-            is QqBotTarget.Group -> plan.limitPassiveReplies(QQBOT_GROUP_PASSIVE_REPLY_LIMIT)
-            is QqBotTarget.Unsupported -> plan
-        }
-        if (limitedPlan.zip(plan).any { (limited, original) ->
-                limited.request.replyToMessageId != original.request.replyToMessageId
-            }) {
-            logger.warn {
-                "QQ 官方机器人被动回复超过平台限制，超出部分改为主动消息：target=${request.target.stableValue()}"
-            }
-        }
         return when (target) {
             is QqBotTarget.User -> sendPlanWithReceipt(
                 routeId = routeId,
                 accountId = accountId,
                 failureLabel = "QQ 官方机器人单聊消息发送失败",
-                plan = limitedPlan,
+                target = request.target,
+                plan = plan,
             ) { item ->
                 when (item) {
                     is QqBotSendPlanItem.Text -> gateway.sendUserMessage(
@@ -239,7 +226,8 @@ public class QqBotGatewayPlugin :
                 routeId = routeId,
                 accountId = accountId,
                 failureLabel = "QQ 官方机器人群聊消息发送失败",
-                plan = limitedPlan,
+                target = request.target,
+                plan = plan,
             ) { item ->
                 when (item) {
                     is QqBotSendPlanItem.Text -> gateway.sendGroupMessage(
@@ -667,13 +655,14 @@ public class QqBotGatewayPlugin :
     private suspend fun sendPlanWithReceipt(
         routeId: String,
         accountId: String,
+        target: TargetAddress,
         failureLabel: String,
         plan: List<QqBotSendPlanItem>,
         send: suspend (QqBotSendPlanItem) -> QqBotSendReceipt,
     ): MessageSendResult {
         val receipts = mutableListOf<QqBotSendReceipt>()
         plan.forEach { item ->
-            val receipt = runCatching { sendWithMentionAllFallback(item, send) }
+            val receipt = runCatching { sendWithMentionAllFallback(accountId, target, item, send) }
                 .getOrElse { error ->
                     return if (receipts.isNotEmpty()) {
                         MessageSendResult.partiallySent(
@@ -725,23 +714,32 @@ public class QqBotGatewayPlugin :
      * 失败或状态未知语义交给上层处理。
      */
     private suspend fun sendWithMentionAllFallback(
+        accountId: String,
+        target: TargetAddress,
         item: QqBotSendPlanItem,
         send: suspend (QqBotSendPlanItem) -> QqBotSendReceipt,
     ): QqBotSendReceipt {
+        val allocated = allocatePassiveReply(accountId, target, item)
         return try {
-            send(item)
+            send(allocated)
         } catch (error: Throwable) {
-            val fallbackItem = item.withoutMentionAllSyntax() ?: throw error
+            val fallbackItem = allocated.withoutMentionAllSyntax() ?: throw error
             if (!error.isMentionAllRejection()) throw error
             // 与主项目重试同一套规则：重发必须换 msg_seq，否则可能被 msg_id+msg_seq 去重拒绝
-            val resendItem = retryReplySeqKeeper
-                .advance(fallbackItem.request.replyToMessageId, listOf(fallbackItem))
-                .single()
+            val resendItem = allocatePassiveReply(accountId, target, fallbackItem)
             logger.warn {
                 "QQ 官方机器人 @全体成员被平台拒绝，已降级为纯文本重发：${error.message.orEmpty()}"
             }
             send(resendItem)
         }
+    }
+
+    private fun allocatePassiveReply(accountId: String, target: TargetAddress, item: QqBotSendPlanItem): QqBotSendPlanItem {
+        val allocated = retryReplySeqKeeper.advance(accountId, target, item)
+        if (item.request.replyToMessageId != null && allocated.request.replyToMessageId == null) {
+            logger.warn { "QQ 官方机器人被动回复超过平台限制，改为主动消息：target=${target.stableValue()}" }
+        }
+        return allocated
     }
 
     private fun QqBotSendPlanItem.withoutMentionAllSyntax(): QqBotSendPlanItem? {
@@ -854,8 +852,6 @@ private const val ACCOUNT_READY_POLL_MILLIS: Long = 1_000L
 
 /** 启动补全群资料时，相邻两次请求之间的间隔（群多时不至于启动瞬间连打一串请求）。 */
 private const val GROUP_INFO_REQUEST_INTERVAL_MILLIS: Long = 2_100L
-private const val QQBOT_USER_PASSIVE_REPLY_LIMIT: Int = 4
-private const val QQBOT_GROUP_PASSIVE_REPLY_LIMIT: Int = 5
 
 /** 群资料拉取失败后的重试冷却：语义明确的业务码失败（多半无权限）按长期，其余按短退避。 */
 private const val INFO_RETRY_PERMANENT_SECONDS: Long = 24L * 60 * 60

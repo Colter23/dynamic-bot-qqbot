@@ -4,50 +4,55 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
+import top.colter.dynamic.core.data.TargetAddress
+import top.colter.dynamic.core.data.TargetKind
 
 class QqBotReplySeqKeeperTest {
+    private val group = TargetAddress.of("qq-official", TargetKind.GROUP, "group")
+    private fun item(replyId: String? = "msg-1") = QqBotSendPlanItem.Text(
+        QqBotSendRequest(content = "text", replyToMessageId = replyId),
+    )
+
     @Test
     fun `非被动回复计划原样返回`() {
-        val plan = listOf(
-            QqBotSendPlanItem.Text(QqBotSendRequest(content = "a", msgSeq = 1)),
-            QqBotSendPlanItem.Text(QqBotSendRequest(content = "b", msgSeq = 2)),
-        )
         val keeper = QqBotReplySeqKeeper()
-
-        val advanced = keeper.advance(null, plan)
-        val advancedBlank = keeper.advance("   ", plan)
-
-        assertSame(plan, advanced)
-        assertSame(plan, advancedBlank)
+        for (replyId in listOf(null, "   ")) {
+            val original = item(replyId)
+            assertSame(original, keeper.advance("app", group, original))
+        }
     }
 
     @Test
-    fun `同一回复 ID 重试时 msgSeq 递增避免官方去重`() {
+    fun `多次发送及重试共用群聊五条配额和递增序号`() {
         val keeper = QqBotReplySeqKeeper()
-        val plan = listOf(
-            QqBotSendPlanItem.Text(QqBotSendRequest(content = "a", msgSeq = 1)),
-            QqBotSendPlanItem.Text(QqBotSendRequest(content = "b", msgSeq = 2)),
-        )
-
-        val first = keeper.advance("msg-1", plan)
-        val second = keeper.advance("msg-1", plan)
-        val third = keeper.advance("msg-1", plan)
-
-        assertEquals(listOf(1, 2), first.map { it.request.msgSeq })
-        assertEquals(listOf(3, 4), second.map { it.request.msgSeq })
-        assertEquals(listOf(5, 6), third.map { it.request.msgSeq })
+        val first = (1..4).map { keeper.advance("app", group, item()) }
+        val second = (1..2).map { keeper.advance("app", group, item()) }
+        assertEquals(listOf(1, 2, 3, 4, 5), (first + second).filter { it.request.replyToMessageId != null }.map { it.request.msgSeq })
+        assertEquals(null, second.last().request.replyToMessageId)
     }
 
     @Test
-    fun `不同回复 ID 的 seq 分配互不影响`() {
+    fun `单聊最多四条被动回复`() {
         val keeper = QqBotReplySeqKeeper()
-        val plan = listOf(QqBotSendPlanItem.Text(QqBotSendRequest(content = "a", msgSeq = 1)))
+        val user = TargetAddress.of("qq-official", TargetKind.USER, "user")
+        val replies = (1..5).map { keeper.advance("app", user, item()) }
+        assertEquals(4, replies.count { it.request.replyToMessageId != null })
+        assertEquals(null, replies.last().request.replyToMessageId)
+    }
 
-        val first = keeper.advance("msg-1", plan)
-        val other = keeper.advance("msg-2", plan)
-
-        assertEquals(1, first.single().request.msgSeq)
-        assertEquals(1, other.single().request.msgSeq)
+    @Test
+    fun `账号目标和消息之间配额隔离`() {
+        val keeper = QqBotReplySeqKeeper()
+        repeat(5) { keeper.advance("app", group, item()) }
+        assertEquals(null, keeper.advance("app", group.copy(accountId = "route-hint"), item()).request.replyToMessageId)
+        for (next in listOf(
+            keeper.advance("other-app", group, item()),
+            keeper.advance("app", group.copy(externalId = "other-group"), item()),
+            keeper.advance("app", group, item("msg-2")),
+        )) {
+            assertEquals(1, next.request.msgSeq)
+            assertTrue(next.request.replyToMessageId != null)
+        }
     }
 
     @Test
@@ -57,15 +62,11 @@ class QqBotReplySeqKeeperTest {
             nowEpochMillis = { now },
             windowMillis = 1_000L,
         )
-        val plan = listOf(QqBotSendPlanItem.Text(QqBotSendRequest(content = "a", msgSeq = 1)))
-
-        keeper.advance("msg-1", plan)
+        repeat(5) { keeper.advance("app", group, item()) }
         now = 2_000L
-
-        val afterWindow = keeper.advance("msg-1", plan)
-
-        // 窗口过期后记录被清理，seq 从头分配
-        assertEquals(1, afterWindow.single().request.msgSeq)
+        val afterWindow = keeper.advance("app", group, item())
+        assertEquals(1, afterWindow.request.msgSeq)
+        assertEquals("msg-1", afterWindow.request.replyToMessageId)
     }
 
     @Test
@@ -73,37 +74,40 @@ class QqBotReplySeqKeeperTest {
         val keeper = QqBotReplySeqKeeper()
         val media = QqBotSendPlanItem.Media(
             media = QqBotMediaResourceSource(fileType = QqBotMediaFileType.IMAGE, url = "https://example.com/a.png"),
-            request = QqBotSendRequest(content = "图", msgType = QQBOT_MEDIA_MSG_TYPE, msgSeq = 1),
+            request = QqBotSendRequest(content = "图", msgType = QQBOT_MEDIA_MSG_TYPE, replyToMessageId = "msg-1", referenceMessageId = "ref-index"),
         )
-
-        val first = keeper.advance("msg-1", listOf(media)).single() as QqBotSendPlanItem.Media
-        val second = keeper.advance("msg-1", listOf(media)).single() as QqBotSendPlanItem.Media
-
-        assertEquals(1, first.request.msgSeq)
+        keeper.advance("app", group, media)
+        val second = keeper.advance("app", group, media) as QqBotSendPlanItem.Media
         assertEquals(2, second.request.msgSeq)
-        assertEquals("图", second.request.content)
-        assertEquals(QQBOT_MEDIA_MSG_TYPE, second.request.msgType)
+        assertEquals(media.request.copy(msgSeq = 2), second.request)
         assertEquals(media.media, second.media)
+        repeat(3) { keeper.advance("app", group, media) }
+        val overflow = keeper.advance("app", group, media) as QqBotSendPlanItem.Media
+        assertEquals(media.request.copy(replyToMessageId = null), overflow.request)
+        assertEquals(media.media, overflow.media)
     }
 
     @Test
-    fun `并发分配不产生重复 seq`() {
+    fun `并发分配不重复发放配额和序号`() {
         val keeper = QqBotReplySeqKeeper()
-        val plan = (1..50).map { index ->
-            QqBotSendPlanItem.Text(QqBotSendRequest(content = "n$index", msgSeq = index))
-        }
-
         val threads = 4
-        val results = java.util.concurrent.ConcurrentLinkedQueue<List<QqBotSendPlanItem>>()
+        val results = java.util.concurrent.ConcurrentLinkedQueue<QqBotSendPlanItem>()
         (1..threads).map {
             Thread {
-                results.add(keeper.advance("msg-1", plan))
+                repeat(50) { results.add(keeper.advance("app", group, item())) }
             }
         }.also { list -> list.forEach { it.start() } }.forEach { it.join() }
 
-        val allSeqs = results.flatten().map { it.request.msgSeq }
-        assertEquals(threads * 50, allSeqs.size)
-        assertEquals(allSeqs.size, allSeqs.distinct().size)
-        assertTrue(allSeqs.all { it > 0 })
+        val passive = results.filter { it.request.replyToMessageId != null }
+        assertEquals(threads * 50, results.size)
+        assertEquals(listOf(1, 2, 3, 4, 5), passive.map { it.request.msgSeq }.sorted())
+    }
+
+    @Test
+    fun `容量耗尽不淘汰仍有效的回复配额`() {
+        val keeper = QqBotReplySeqKeeper(maxEntries = 1)
+        repeat(5) { keeper.advance("app", group, item()) }
+        assertEquals(null, keeper.advance("app", group, item("other")).request.replyToMessageId)
+        assertEquals(null, keeper.advance("app", group, item()).request.replyToMessageId)
     }
 }

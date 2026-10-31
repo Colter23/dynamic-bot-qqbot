@@ -1,6 +1,6 @@
 id: qqbot-gateway
 name: QQ 官方机器人插件
-version: 0.0.1
+version: 0.0.2
 mainClass: top.colter.dynamic.qqbot.QqBotGatewayPlugin
 apiVersion: 4.0.0
 description: QQ 官方机器人消息收发。

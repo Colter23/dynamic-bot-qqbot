@@ -108,6 +108,125 @@ class QqBotWebSocketGatewayTest {
     }
 
     @Test
+    fun `心跳已确认时持续发送且不安排重连`() = runTest {
+        var now = 0L
+        val connector = FakeQqBotWebSocketConnector()
+        val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
+        val reconnectScheduler = FakeQqBotReconnectScheduler()
+        val gateway = testGateway(
+            connector = connector, heartbeatScheduler = heartbeatScheduler,
+            reconnectScheduler = reconnectScheduler, nowNanos = { now },
+        )
+        gateway.connect { }
+        connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        connector.listener.onText("""{"op":0,"s":88,"t":"READY","d":{"session_id":"session-a"}}""")
+
+        repeat(3) {
+            now += TimeUnit.MILLISECONDS.toNanos(45_000)
+            heartbeatScheduler.scheduled.single().task()
+            connector.listener.onText("""{"op":11,"d":null}""")
+        }
+
+        assertEquals(4, connector.session.sentTexts.size)
+        assertEquals(0, reconnectScheduler.scheduled.size)
+        assertEquals(MessageSinkRouteState.READY, gateway.availableAccounts().single().state)
+        gateway.close()
+    }
+
+    @Test
+    fun `心跳超时关闭旧连接并恢复会话且忽略旧任务和旧确认`() = runTest {
+        var now = 0L
+        val connector = FakeQqBotWebSocketConnector()
+        val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
+        val reconnectScheduler = FakeQqBotReconnectScheduler()
+        val gateway = testGateway(
+            connector = connector, heartbeatScheduler = heartbeatScheduler,
+            reconnectScheduler = reconnectScheduler, transport = reconnectTransport(), nowNanos = { now },
+        )
+        gateway.connect { }
+        val oldListener = connector.listener
+        val oldSession = connector.session
+        oldListener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        oldListener.onText("""{"op":0,"s":88,"t":"READY","d":{"session_id":"session-a"}}""")
+        val oldHeartbeat = heartbeatScheduler.scheduled.single()
+        now = TimeUnit.MILLISECONDS.toNanos(45_000)
+        oldHeartbeat.task()
+        now = TimeUnit.MILLISECONDS.toNanos(90_000)
+        oldHeartbeat.task()
+
+        assertEquals(4000, oldSession.closedStatusCode)
+        assertEquals(true, oldHeartbeat.closed)
+        assertEquals(MessageSinkRouteState.UNAVAILABLE, gateway.availableAccounts().single().state)
+        assertEquals(1_000L, reconnectScheduler.scheduled.single().delayMillis)
+
+        reconnectScheduler.scheduled.single().task()
+        connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":30000}}""")
+        val resume = Json.parseToJsonElement(connector.session.sentTexts.single()).jsonObject
+        assertEquals(QqBotOpcode.RESUME.code, resume.getValue("op").jsonPrimitive.int)
+        connector.listener.onText("""{"op":0,"s":89,"t":"RESUMED","d":{}}""")
+        assertEquals(MessageSinkRouteState.READY, gateway.availableAccounts().single().state)
+        now += TimeUnit.MILLISECONDS.toNanos(30_000)
+        heartbeatScheduler.scheduled.last().task()
+        oldListener.onText("""{"op":11,"d":null}""")
+        oldHeartbeat.task()
+        assertEquals(2, connector.session.sentTexts.size)
+        assertEquals(1, reconnectScheduler.scheduled.size)
+        now += TimeUnit.MILLISECONDS.toNanos(30_000)
+        heartbeatScheduler.scheduled.last().task()
+
+        assertEquals(2, reconnectScheduler.scheduled.size)
+        assertEquals(MessageSinkRouteState.UNAVAILABLE, gateway.availableAccounts().single().state)
+        gateway.close()
+    }
+
+    @Test
+    fun `额外心跳请求不延长未确认心跳的超时时间`() = runTest {
+        var now = 0L
+        val connector = FakeQqBotWebSocketConnector()
+        val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
+        val reconnectScheduler = FakeQqBotReconnectScheduler()
+        val gateway = testGateway(
+            connector = connector, heartbeatScheduler = heartbeatScheduler,
+            reconnectScheduler = reconnectScheduler, nowNanos = { now },
+        )
+        gateway.connect { }
+        connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        heartbeatScheduler.scheduled.single().task()
+        now = TimeUnit.MILLISECONDS.toNanos(44_000)
+        connector.listener.onText("""{"op":1,"d":null}""")
+        now = TimeUnit.MILLISECONDS.toNanos(45_000)
+        heartbeatScheduler.scheduled.single().task()
+
+        assertEquals(1, reconnectScheduler.scheduled.size)
+        assertEquals(4000, connector.session.closedStatusCode)
+        gateway.close()
+    }
+
+    @Test
+    fun `禁用重连时心跳超时仍关闭连接并标记不可用`() = runTest {
+        var now = 0L
+        val connector = FakeQqBotWebSocketConnector()
+        val heartbeatScheduler = FakeQqBotHeartbeatScheduler()
+        val reconnectScheduler = FakeQqBotReconnectScheduler()
+        val gateway = testGateway(
+            connector = connector, heartbeatScheduler = heartbeatScheduler,
+            reconnectScheduler = reconnectScheduler, reconnect = false, nowNanos = { now },
+        )
+        gateway.connect { }
+        connector.listener.onText("""{"op":10,"d":{"heartbeat_interval":45000}}""")
+        connector.listener.onText("""{"op":0,"s":88,"t":"READY","d":{"session_id":"session-a"}}""")
+        heartbeatScheduler.scheduled.single().task()
+        now = TimeUnit.MILLISECONDS.toNanos(45_000)
+        heartbeatScheduler.scheduled.single().task()
+
+        assertEquals(4000, connector.session.closedStatusCode)
+        assertEquals(true, heartbeatScheduler.scheduled.single().closed)
+        assertEquals(0, reconnectScheduler.scheduled.size)
+        assertEquals(MessageSinkRouteState.UNAVAILABLE, gateway.availableAccounts().single().state)
+        gateway.close()
+    }
+
+    @Test
     fun `收到网关心跳请求时立即回应最新序号`() = runTest {
         val connector = FakeQqBotWebSocketConnector()
         val gateway = testGateway(connector = connector)
@@ -686,6 +805,7 @@ class QqBotWebSocketGatewayTest {
         reconnectScheduler: FakeQqBotReconnectScheduler = FakeQqBotReconnectScheduler(),
         reconnect: Boolean = true,
         transport: FakeQqBotHttpTransport = defaultTransport(),
+        nowNanos: () -> Long = System::nanoTime,
     ): QqBotWebSocketGateway {
         val config = QqBotConfig(
             enabled = true,
@@ -699,6 +819,7 @@ class QqBotWebSocketGatewayTest {
             connector = connector,
             heartbeatScheduler = heartbeatScheduler,
             reconnectScheduler = reconnectScheduler,
+            nowNanos = nowNanos,
         )
     }
 

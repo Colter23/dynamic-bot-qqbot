@@ -186,6 +186,53 @@ class QqBotOpenApiClientTest {
     }
 
     @Test
+    fun `发送接口成功但响应无法解析时判定为状态未知`() {
+        for (body in listOf("", "{\"id\":", "[]", "null", "<html>error</html>")) {
+            val transport = FakeQqBotHttpTransport(
+                postResponses = ArrayDeque(listOf(
+                    QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}"""),
+                    QqBotHttpResponse(200, body),
+                )),
+            )
+            val client = QqBotOpenApiClient(
+                config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+                transport = transport,
+            )
+
+            val error = assertFailsWith<QqBotOpenApiException> {
+                client.sendMessage(QqBotOpenApiScope.Group("group"), QqBotSendRequest(content = "hello"))
+            }
+
+            assertEquals(true, error.outcomeUnknown, "无法解析的回执：$body")
+            assertEquals(2, transport.posts.size)
+        }
+    }
+
+    @Test
+    fun `媒体准备响应无法解析仍可重试且不是消息状态未知`() {
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(listOf(
+                QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}"""),
+                QqBotHttpResponse(200, ""),
+            )),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        val error = assertFailsWith<QqBotOpenApiException> {
+            client.prepareMedia(
+                QqBotOpenApiScope.Group("group"),
+                QqBotMediaPrepareRequest(fileType = QqBotMediaFileType.IMAGE, url = "https://example.com/a.png"),
+            )
+        }
+
+        assertEquals(false, error.outcomeUnknown)
+        assertEquals(true, error.retryable)
+    }
+
+    @Test
     fun `鉴权请求收到 401 时刷新令牌并只重试一次`() {
         val transport = FakeQqBotHttpTransport(
             postResponses = ArrayDeque(

@@ -138,7 +138,7 @@ class QqBotMessageMapperTest {
         }
 
         val keeper = QqBotReplySeqKeeper()
-        val limited = plan.map { keeper.advance("app", TargetAddress.of("qq-official", TargetKind.GROUP, "group"), it) }
+        val limited = plan.map { keeper.reserve("app", TargetAddress.of("qq-official", TargetKind.GROUP, "group"), it).item }
 
         assertEquals(listOf("source-msg", "source-msg", "source-msg", "source-msg", "source-msg", null), limited.map { it.request.replyToMessageId })
         assertEquals(listOf(1, 2, 3, 4, 5, 6), limited.map { it.request.msgSeq })

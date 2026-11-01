@@ -519,6 +519,42 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
+    fun `媒体准备失败不会耗尽被动回复配额`() = runBlocking {
+        for (kind in listOf(TargetKind.USER, TargetKind.GROUP)) {
+            val plugin = QqBotGatewayPlugin().prepareSendTest()
+            plugin.setPrivate("gateway", FailingGateway(
+                QqBotMediaPreparationException(java.net.http.HttpTimeoutException("准备超时")),
+            ))
+            plugin.setPrivate("running", true)
+            val target = TargetAddress.of("qq-official", kind, "target")
+            val mediaRequest = sendRequest(
+                target = target,
+                batches = listOf(MessageBatch(listOf(MessageContent.Image(
+                    fallbackText = "图片",
+                    image = MediaRef(uri = "https://example.com/a.png", kind = MediaKind.IMAGE),
+                )))),
+                replyToMessageId = "source-msg",
+            )
+            repeat(6) {
+                val failed = assertIs<MessageSendResult.Failed>(plugin.sendMessage(mediaRequest, "qqbot:qq-official:app-id"))
+                assertTrue(failed.retryable)
+            }
+            val gateway = FakeGateway()
+            plugin.setPrivate("gateway", gateway)
+            val limit = if (kind == TargetKind.USER) 4 else 5
+            val result = plugin.sendMessage(sendRequest(
+                target = target,
+                batches = (1..(limit + 1)).map { MessageBatch(listOf(MessageContent.Text("回复$it"))) },
+                replyToMessageId = "source-msg",
+            ), "qqbot:qq-official:app-id")
+
+            assertIs<MessageSendResult.Sent>(result)
+            assertEquals(List(limit) { "source-msg" } + null, gateway.sentRequests.map { it.replyToMessageId })
+            assertEquals((7..(6 + limit)).toList(), gateway.sentRequests.take(limit).map { it.msgSeq })
+        }
+    }
+
+    @Test
     fun `业务错误码判定为不可重试时透传终态失败`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FailingGateway(
@@ -561,6 +597,26 @@ class QqBotGatewayPluginSendTest {
         val result = plugin.sendMessage(
             request = deliveryRequest(TargetAddress.of("qq-official", TargetKind.USER, "user-openid"), "hello"),
             routeId = "qqbot:qq-official:app-id",
+        )
+
+        assertIs<MessageSendResult.Uncertain>(result)
+    }
+
+    @Test
+    fun `回执解析失败的未知标记上报状态未知`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        plugin.setPrivate("gateway", FailingGateway(QqBotOpenApiException(
+            action = "发送 QQ 官方机器人消息",
+            statusCode = 200,
+            message = "响应不是有效 JSON 对象",
+            body = "",
+            outcomeUnknownFlag = true,
+        )))
+        plugin.setPrivate("running", true)
+
+        val result = plugin.sendMessage(
+            deliveryRequest(TargetAddress.of("qq-official", TargetKind.GROUP, "group"), "hello"),
+            "qqbot:qq-official:app-id",
         )
 
         assertIs<MessageSendResult.Uncertain>(result)
@@ -864,6 +920,30 @@ class QqBotGatewayPluginSendTest {
         // 重发沿用同一 msg_id 时必须换 seq，否则会被官方去重
         assertEquals(1, gateway.sentRequests[0].msgSeq)
         assertEquals(2, gateway.sentRequests[1].msgSeq)
+    }
+
+    @Test
+    fun `at-everyone 遇到无关客户端错误不降级重发`() = runBlocking {
+        for ((status, code) in listOf(429 to null, 401 to "11243", 400 to "40034005", 403 to null)) {
+            val plugin = QqBotGatewayPlugin().prepareSendTest()
+            val gateway = FakeGateway(failFirstGroupSend = QqBotOpenApiException(
+                action = "send", statusCode = status, code = code, message = "发送失败", body = "",
+            ))
+            plugin.setPrivate("gateway", gateway)
+            plugin.setPrivate("running", true)
+
+            val result = plugin.sendMessage(sendRequest(
+                target = TargetAddress.of("qq-official", TargetKind.GROUP, "group"),
+                batches = listOf(MessageBatch(listOf(
+                    MessageContent.Text("开播了"), MessageContent.MentionAll(fallbackText = ""),
+                ))),
+                replyToMessageId = "source-msg",
+            ), "qqbot:qq-official:app-id")
+
+            assertIs<MessageSendResult.Failed>(result)
+            assertEquals(1, gateway.sentRequests.size, "不应立即重发：status=$status code=$code")
+            assertTrue(gateway.sentRequests.single().content.contains("<qqbot-at-everyone />"))
+        }
     }
 
     @Test

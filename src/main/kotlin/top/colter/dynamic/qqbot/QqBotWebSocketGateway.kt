@@ -30,6 +30,7 @@ internal class QqBotWebSocketGateway(
     private val connector: QqBotWebSocketConnector = QqBotJdkWebSocketConnector(),
     private val heartbeatScheduler: QqBotHeartbeatScheduler = ExecutorQqBotHeartbeatScheduler(),
     private val reconnectScheduler: QqBotReconnectScheduler = ExecutorQqBotReconnectScheduler(),
+    private val nowNanos: () -> Long = System::nanoTime,
 ) : QqBotGateway {
     private val lifecycleLock = Any()
 
@@ -42,6 +43,10 @@ internal class QqBotWebSocketGateway(
 
     @Volatile
     private var heartbeatTask: AutoCloseable? = null
+
+    // 由 lifecycleLock 保护；额外心跳不延后最早一条未确认心跳的截止时间。
+    private var heartbeatSentAtNanos: Long? = null
+    private var heartbeatIntervalNanos: Long = Long.MAX_VALUE
 
     @Volatile
     private var reconnectTask: AutoCloseable? = null
@@ -312,6 +317,7 @@ internal class QqBotWebSocketGateway(
         reconnecting = false
         val session = synchronized(lifecycleLock) {
             connectionGeneration += 1
+            heartbeatSentAtNanos = null
             pendingGatewayTexts.clear()
             val current = webSocket
             webSocket = null
@@ -384,6 +390,7 @@ internal class QqBotWebSocketGateway(
             if (generation != connectionGeneration) return@synchronized null
             connectionGeneration += 1
             heartbeatTask.closeAndClear { heartbeatTask = null }
+            heartbeatSentAtNanos = null
             pendingGatewayTexts.clear()
             val session = webSocket
             webSocket = null
@@ -431,6 +438,7 @@ internal class QqBotWebSocketGateway(
         return synchronized(lifecycleLock) {
             connectionGeneration += 1
             heartbeatTask.closeAndClear { heartbeatTask = null }
+            heartbeatSentAtNanos = null
             pendingGatewayTexts.clear()
             val session = webSocket
             webSocket = null
@@ -467,7 +475,7 @@ internal class QqBotWebSocketGateway(
         return 1_000L * (1L shl exponent)
     }
 
-    private fun handleText(payload: String) {
+    private fun handleText(payload: String, generation: Long) {
         val frame = runCatching { QqBotWebSocketProtocol.parseFrame(payload) }
             .onFailure { error -> logger.warn(error) { "QQ 官方机器人 WebSocket 帧解析失败" } }
             .getOrNull()
@@ -477,23 +485,29 @@ internal class QqBotWebSocketGateway(
         logFrame(frame)
 
         when (frame.opcode) {
-            QqBotOpcode.HELLO -> handleHello(payload)
-            QqBotOpcode.HEARTBEAT -> sendHeartbeat("QQ 官方机器人网关要求立即心跳")
+            QqBotOpcode.HELLO -> handleHello(payload, generation)
+            QqBotOpcode.HEARTBEAT -> sendHeartbeat("QQ 官方机器人网关要求立即心跳", generation)
             QqBotOpcode.DISPATCH -> handleDispatch(payload)
-            QqBotOpcode.HEARTBEAT_ACK -> logger.debug { "QQ 官方机器人心跳已确认" }
+            QqBotOpcode.HEARTBEAT_ACK -> {
+                synchronized(lifecycleLock) {
+                    if (!isCurrentConnection(generation)) return
+                    heartbeatSentAtNanos = null
+                }
+                logger.debug { "QQ 官方机器人心跳已确认" }
+            }
             QqBotOpcode.RECONNECT -> handleReconnectRequest()
             QqBotOpcode.INVALID_SESSION -> handleInvalidSession()
             else -> logger.debug { "忽略 QQ 官方机器人 WebSocket 帧：op=${frame.opcode.code} type=${frame.type.orEmpty()}" }
         }
     }
 
-    private fun handleHello(payload: String) {
+    private fun handleHello(payload: String, generation: Long) {
         val hello = runCatching { QqBotWebSocketProtocol.parseHello(payload) }
             .onFailure { error -> logger.warn(error) { "QQ 官方机器人 Hello 包解析失败" } }
             .getOrNull()
             ?: return
 
-        startHeartbeat(hello.heartbeatIntervalMillis)
+        startHeartbeat(hello.heartbeatIntervalMillis, generation)
         sendResumeOrIdentify()
         logger.debug { "QQ 官方机器人 WebSocket Hello 包已处理：heartbeat=${hello.heartbeatIntervalMillis}ms" }
     }
@@ -585,19 +599,35 @@ internal class QqBotWebSocketGateway(
         }
     }
 
-    private fun startHeartbeat(intervalMillis: Long) {
-        heartbeatTask.closeAndClear { heartbeatTask = null }
-        heartbeatTask = heartbeatScheduler.scheduleAtFixedRate(
-            initialDelayMillis = intervalMillis,
-            intervalMillis = intervalMillis,
-        ) {
-            sendHeartbeat("定时心跳")
+    private fun startHeartbeat(intervalMillis: Long, generation: Long) {
+        synchronized(lifecycleLock) {
+            if (!isCurrentConnection(generation)) return
+            heartbeatTask.closeAndClear { heartbeatTask = null }
+            heartbeatSentAtNanos = null
+            heartbeatIntervalNanos = TimeUnit.MILLISECONDS.toNanos(intervalMillis)
+            heartbeatTask = heartbeatScheduler.scheduleAtFixedRate(
+                initialDelayMillis = intervalMillis,
+                intervalMillis = intervalMillis,
+            ) {
+                sendHeartbeat("定时心跳", generation)
+            }
         }
     }
 
-    private fun sendHeartbeat(reason: String) {
-        val payload = QqBotWebSocketProtocol.heartbeatPayload(latestSequence)
-        sendGatewayText(payload)
+    private fun sendHeartbeat(reason: String, generation: Long) {
+        synchronized(lifecycleLock) {
+            if (!isCurrentConnection(generation)) return
+            val now = nowNanos()
+            val sentAt = heartbeatSentAtNanos
+            if (sentAt != null && now - sentAt >= heartbeatIntervalNanos) {
+                markUnavailable()
+                clearTransport(generation)?.close(4000, "心跳确认超时")
+                scheduleReconnect("QQ 官方机器人心跳确认超时", closeCurrentSession = false)
+                return
+            }
+            if (sentAt == null) heartbeatSentAtNanos = now
+            sendGatewayText(QqBotWebSocketProtocol.heartbeatPayload(latestSequence))
+        }
         logger.debug { "QQ 官方机器人心跳已发送：reason=$reason seq=${latestSequence ?: "-"}" }
     }
 
@@ -764,7 +794,7 @@ internal class QqBotWebSocketGateway(
 
         override fun onText(payload: String) {
             if (!isCurrentConnection(generation)) return
-            handleText(payload)
+            handleText(payload, generation)
         }
 
         override fun onClosed(statusCode: Int, reason: String) {

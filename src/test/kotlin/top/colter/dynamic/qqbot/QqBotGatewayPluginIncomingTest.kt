@@ -3,11 +3,11 @@ package top.colter.dynamic.qqbot
 import java.security.MessageDigest
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.test.Test
@@ -19,9 +19,9 @@ import top.colter.dynamic.core.plugin.IncomingMessagePublisher
 
 class QqBotGatewayPluginIncomingTest {
     @Test
-    fun `入站事件应异步发布`() = runBlocking {
+    fun `入站事件应异步发布`() = runTest {
         val plugin = QqBotGatewayPlugin()
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
         val publishStarted = CompletableDeferred<Unit>()
         val releasePublish = CompletableDeferred<Unit>()
         val published = CompletableDeferred<IncomingMessagePublishRequest>()
@@ -36,7 +36,7 @@ class QqBotGatewayPluginIncomingTest {
 
         try {
             plugin.setPrivate("running", true)
-            val callbackReturned = async(Dispatchers.Default) {
+            val callbackReturned = async {
                 plugin.invokeIncoming(c2cEvent())
             }
 
@@ -59,9 +59,9 @@ class QqBotGatewayPluginIncomingTest {
     }
 
     @Test
-    fun `关闭自动发布时忽略入站事件`() = runBlocking {
+    fun `关闭自动发布时忽略入站事件`() = runTest {
         val plugin = QqBotGatewayPlugin()
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
         val published = CompletableDeferred<IncomingMessagePublishRequest>()
         plugin.prepareIncomingTest(
             scope = scope,
@@ -82,9 +82,9 @@ class QqBotGatewayPluginIncomingTest {
     }
 
     @Test
-    fun `群 at 事件应发布标准入站消息`() = runBlocking {
+    fun `群 at 事件应发布标准入站消息`() = runTest {
         val plugin = QqBotGatewayPlugin()
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
         val publishedIncoming = CompletableDeferred<IncomingMessagePublishRequest>()
         plugin.prepareIncomingTest(
             scope = scope,
@@ -114,9 +114,9 @@ class QqBotGatewayPluginIncomingTest {
     }
 
     @Test
-    fun `群普通消息 at 当前机器人时应发布可被主项目解析的命令文本`() = runBlocking {
+    fun `群普通消息 at 当前机器人时应发布可被主项目解析的命令文本`() = runTest {
         val plugin = QqBotGatewayPlugin()
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
         val publishedIncoming = CompletableDeferred<IncomingMessagePublishRequest>()
         plugin.prepareIncomingTest(
             scope = scope,
@@ -140,9 +140,9 @@ class QqBotGatewayPluginIncomingTest {
     }
 
     @Test
-    fun `私聊命令上下文应视为发给当前机器人`() = runBlocking {
+    fun `私聊命令上下文应视为发给当前机器人`() = runTest {
         val plugin = QqBotGatewayPlugin()
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
         val publishedIncoming = CompletableDeferred<IncomingMessagePublishRequest>()
         plugin.prepareIncomingTest(
             scope = scope,
@@ -165,9 +165,9 @@ class QqBotGatewayPluginIncomingTest {
     }
 
     @Test
-    fun `空白入站文本仍发布入站消息`() = runBlocking {
+    fun `空白入站文本仍发布入站消息`() = runTest {
         val plugin = QqBotGatewayPlugin()
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
         val publishedIncoming = CompletableDeferred<IncomingMessagePublishRequest>()
         plugin.prepareIncomingTest(
             scope = scope,
@@ -187,9 +187,9 @@ class QqBotGatewayPluginIncomingTest {
     }
 
     @Test
-    fun `不支持的入站事件会被忽略`() = runBlocking {
+    fun `不支持的入站事件会被忽略`() = runTest {
         val plugin = QqBotGatewayPlugin()
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
         val published = CompletableDeferred<IncomingMessagePublishRequest>()
         plugin.prepareIncomingTest(
             scope = scope,

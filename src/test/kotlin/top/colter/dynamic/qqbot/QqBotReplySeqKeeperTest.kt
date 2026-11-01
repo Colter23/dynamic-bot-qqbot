@@ -12,6 +12,37 @@ class QqBotReplySeqKeeperTest {
     private fun item(replyId: String? = "msg-1") = QqBotSendPlanItem.Text(
         QqBotSendRequest(content = "text", replyToMessageId = replyId),
     )
+    private fun QqBotReplySeqKeeper.advance(accountId: String, target: TargetAddress, item: QqBotSendPlanItem) =
+        reserve(accountId, target, item).item
+
+    @Test
+    fun `释放预约只归还次数且不回退序号`() {
+        val keeper = QqBotReplySeqKeeper()
+        val reserved = (1..5).map { keeper.reserve("app", group, item()) }
+        assertEquals(null, keeper.advance("app", group, item()).request.replyToMessageId)
+
+        reserved.first().release()
+        reserved.first().release()
+
+        val next = keeper.advance("app", group, item())
+        assertEquals("msg-1", next.request.replyToMessageId)
+        assertEquals(6, next.request.msgSeq)
+        assertEquals(null, keeper.advance("app", group, item()).request.replyToMessageId)
+    }
+
+    @Test
+    fun `并发释放同一预约不会重复归还配额`() {
+        val keeper = QqBotReplySeqKeeper()
+        val reserved = keeper.reserve("app", group, item())
+        repeat(4) { keeper.advance("app", group, item()) }
+
+        (1..8).map { Thread { repeat(20) { reserved.release() } } }
+            .also { threads -> threads.forEach { it.start() } }
+            .forEach { it.join() }
+
+        assertEquals(6, keeper.advance("app", group, item()).request.msgSeq)
+        assertEquals(null, keeper.advance("app", group, item()).request.replyToMessageId)
+    }
 
     @Test
     fun `非被动回复计划原样返回`() {

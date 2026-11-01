@@ -375,7 +375,7 @@ internal class QqBotOpenApiClient(
         )
     }
 
-    private fun parseResponseObject(action: String, body: String): JsonObject = runCatching {
+    private fun parseResponseObject(action: String, body: String, outcomeUnknown: Boolean = false): JsonObject = runCatching {
         json.parseToJsonElement(body).asObjectOrNull() ?: error("响应根节点不是 JSON 对象")
     }.getOrElse { error ->
         throw QqBotOpenApiException(
@@ -383,6 +383,7 @@ internal class QqBotOpenApiClient(
             statusCode = 200,
             message = "响应不是有效 JSON 对象：${error.message.orEmpty()}",
             body = body,
+            outcomeUnknownFlag = outcomeUnknown,
         )
     }
 
@@ -473,7 +474,7 @@ internal class QqBotOpenApiClient(
     }
 
     private fun parseSendReceipt(action: String, response: QqBotHttpResponse): QqBotSendReceipt {
-        val root = parseResponseObject(action, response.body)
+        val root = parseResponseObject(action, response.body, outcomeUnknown = true)
         val messageId = root["id"]?.asPrimitiveOrNull()?.contentOrNull?.trim().orEmpty()
         if (messageId.isBlank()) {
             throw QqBotOpenApiException(

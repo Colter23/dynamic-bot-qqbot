@@ -709,9 +709,8 @@ public class QqBotGatewayPlugin :
     /**
      * 发送单个计划项；带 @全体成员 的条目被平台明确拒绝时，去掉标签后以纯文本重发一次。
      *
-     * 平台还要求机器人是该群管理员，插件无法预检，只能被拒后降级。只在"明确的 4xx 拒绝"
-     * 时重发：超时/连接中断/5xx 时上游可能已经受理消息，重发会造成重复消息，保持原有
-     * 失败或状态未知语义交给上层处理。
+     * 平台还要求机器人是该群管理员，插件无法预检，只对明确的 @全体权限或次数错误降级。
+     * 其他失败保持原有失败或状态未知语义，避免绕过限流或造成重复消息。
      */
     private suspend fun sendWithMentionAllFallback(
         accountId: String,
@@ -719,27 +718,36 @@ public class QqBotGatewayPlugin :
         item: QqBotSendPlanItem,
         send: suspend (QqBotSendPlanItem) -> QqBotSendReceipt,
     ): QqBotSendReceipt {
-        val allocated = allocatePassiveReply(accountId, target, item)
         return try {
-            send(allocated)
+            sendWithPassiveReply(accountId, target, item, send)
         } catch (error: Throwable) {
-            val fallbackItem = allocated.withoutMentionAllSyntax() ?: throw error
+            val fallbackItem = item.withoutMentionAllSyntax() ?: throw error
             if (!error.isMentionAllRejection()) throw error
             // 与主项目重试同一套规则：重发必须换 msg_seq，否则可能被 msg_id+msg_seq 去重拒绝
-            val resendItem = allocatePassiveReply(accountId, target, fallbackItem)
             logger.warn {
                 "QQ 官方机器人 @全体成员被平台拒绝，已降级为纯文本重发：${error.message.orEmpty()}"
             }
-            send(resendItem)
+            sendWithPassiveReply(accountId, target, fallbackItem, send)
         }
     }
 
-    private fun allocatePassiveReply(accountId: String, target: TargetAddress, item: QqBotSendPlanItem): QqBotSendPlanItem {
-        val allocated = retryReplySeqKeeper.advance(accountId, target, item)
+    private suspend fun sendWithPassiveReply(
+        accountId: String,
+        target: TargetAddress,
+        item: QqBotSendPlanItem,
+        send: suspend (QqBotSendPlanItem) -> QqBotSendReceipt,
+    ): QqBotSendReceipt {
+        val reservation = retryReplySeqKeeper.reserve(accountId, target, item)
+        val allocated = reservation.item
         if (item.request.replyToMessageId != null && allocated.request.replyToMessageId == null) {
             logger.warn { "QQ 官方机器人被动回复超过平台限制，改为主动消息：target=${target.stableValue()}" }
         }
-        return allocated
+        return try {
+            send(allocated)
+        } catch (error: Throwable) {
+            if (error.findCause<QqBotMediaPreparationException>() != null) reservation.release()
+            throw error
+        }
     }
 
     private fun QqBotSendPlanItem.withoutMentionAllSyntax(): QqBotSendPlanItem? {
@@ -754,8 +762,7 @@ public class QqBotGatewayPlugin :
     private fun Throwable.isMentionAllRejection(): Boolean {
         val api = this as? QqBotOpenApiException ?: return false
         if (api.outcomeUnknown) return false
-        // 只认客户端错误：5xx/504 可能已经受理消息，立即重发有重复推送风险
-        return api.statusCode in 400..499
+        return api.statusCode in 400..499 && api.code in setOf("304019", "1100304")
     }
 
     /**

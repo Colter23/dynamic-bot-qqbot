@@ -252,10 +252,11 @@ internal class QqBotOpenApiClient(
             },
         )
         val response = authorizedRequest { headers ->
-            transport.postJson(
+            transport.postJsonWithTimeout(
                 url = "$OPEN_API_BASE_URL/v2/${scope.resource}/${scope.id.pathSegment()}/upload_prepare",
                 headers = headers,
                 body = body,
+                timeout = UPLOAD_CONTROL_TIMEOUT,
             )
         }
         ensureSuccess(action, response)
@@ -307,10 +308,14 @@ internal class QqBotOpenApiClient(
     }
 
     /** 分片上传第二步：把单个分片 PUT 到预签名 URL（不携带机器人鉴权头）。 */
-    fun putUploadPart(presignedUrl: String, bytes: ByteArray) {
+    fun putUploadPart(
+        presignedUrl: String,
+        bytes: ByteArray,
+        timeout: Duration = qqBotUploadPartTimeout(bytes.size.toLong()),
+    ) {
         val url = presignedUrl.trim()
         require(url.isNotBlank()) { "QQ 官方机器人分片预签名 URL 不能为空" }
-        val response = transport.putBytes(url, bytes)
+        val response = transport.putBytesWithTimeout(url, bytes, timeout)
         if (response.statusCode !in 200..299) {
             throw QqBotOpenApiException(
                 action = "上传 QQ 官方机器人分片",
@@ -322,7 +327,11 @@ internal class QqBotOpenApiClient(
     }
 
     /** 分片上传第三步：通知服务端该分片已完成。 */
-    fun finishUploadPart(scope: QqBotOpenApiScope, request: QqBotUploadPartFinishRequest) {
+    fun finishUploadPart(
+        scope: QqBotOpenApiScope,
+        request: QqBotUploadPartFinishRequest,
+        timeout: Duration = UPLOAD_CONTROL_TIMEOUT,
+    ) {
         val body = json.encodeToString(
             buildJsonObject {
                 put("upload_id", JsonPrimitive(request.uploadId))
@@ -332,10 +341,11 @@ internal class QqBotOpenApiClient(
             },
         )
         val response = authorizedRequest { headers ->
-            transport.postJson(
+            transport.postJsonWithTimeout(
                 url = "$OPEN_API_BASE_URL/v2/${scope.resource}/${scope.id.pathSegment()}/upload_part_finish",
                 headers = headers,
                 body = body,
+                timeout = timeout,
             )
         }
         ensureSuccess("确认 QQ 官方机器人分片", response)
@@ -528,6 +538,7 @@ internal class QqBotOpenApiClient(
         private const val DEFAULT_UPLOAD_RETRY_DELAY_SECONDS: Long = 1L
         private const val MEDIA_PREPARE_TIMEOUT_SECONDS: Long = 60L
         private const val HTTP_UNAUTHORIZED: Int = 401
+        internal val UPLOAD_CONTROL_TIMEOUT: Duration = Duration.ofSeconds(30)
 
         private val json = Json {
             ignoreUnknownKeys = true
@@ -691,6 +702,9 @@ internal interface QqBotHttpTransport {
 
     /** 分片上传：把分片字节 PUT 到预签名 URL。 */
     fun putBytes(url: String, bytes: ByteArray): QqBotHttpResponse
+
+    fun putBytesWithTimeout(url: String, bytes: ByteArray, timeout: Duration): QqBotHttpResponse =
+        putBytes(url, bytes)
 }
 
 internal data class QqBotHttpResponse(
@@ -735,8 +749,12 @@ internal class QqBotJdkHttpTransport(
     }
 
     override fun putBytes(url: String, bytes: ByteArray): QqBotHttpResponse {
+        return putBytesWithTimeout(url, bytes, qqBotUploadPartTimeout(bytes.size.toLong()))
+    }
+
+    override fun putBytesWithTimeout(url: String, bytes: ByteArray, timeout: Duration): QqBotHttpResponse {
         val request = HttpRequest.newBuilder(URI.create(url))
-            .timeout(Duration.ofSeconds(60))
+            .timeout(timeout)
             .PUT(HttpRequest.BodyPublishers.ofByteArray(bytes))
             .build()
         return send(request)
@@ -761,6 +779,13 @@ internal class QqBotJdkHttpTransport(
             body = response.body().orEmpty(),
         )
     }
+}
+
+/** 为低速上行预留传输时间及响应余量，大分片最多等待 5 分钟。 */
+internal fun qqBotUploadPartTimeout(sizeBytes: Long): Duration {
+    val bytesPerSecond = 64L * 1024
+    val transferSeconds = (sizeBytes.coerceAtLeast(0) + bytesPerSecond - 1) / bytesPerSecond
+    return Duration.ofSeconds((30L + transferSeconds).coerceIn(60L, 300L))
 }
 
 

@@ -1,17 +1,20 @@
 package top.colter.dynamic.qqbot
 
+import java.io.IOException
+import java.net.URI
+import java.net.http.HttpTimeoutException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
-import top.colter.dynamic.core.tools.loggerFor
-import java.io.IOException
-import java.net.http.HttpTimeoutException
+import java.time.Duration
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
+import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
+import top.colter.dynamic.core.tools.loggerFor
 
 private val mediaLogger = loggerFor<QqBotMediaUploader>()
 
@@ -79,7 +82,12 @@ internal object QqBotFileHasher {
  */
 internal class QqBotMediaUploader(
     private val client: QqBotOpenApiClient,
+    private val nowNanos: () -> Long = System::nanoTime,
+    private val sleepMillis: (Long) -> Unit = Thread::sleep,
 ) {
+    // 同一账号批量投递时共享上行带宽，不能为每个目标叠加服务端下发的并发数。
+    private val uploadSlots = Semaphore(MAX_UPLOAD_CONCURRENCY, true)
+
     fun upload(
         scope: QqBotOpenApiScope,
         fileType: QqBotMediaFileType,
@@ -99,7 +107,10 @@ internal class QqBotMediaUploader(
             ),
         )
         val chunks = buildChunks(ticket, hashes.sizeBytes)
-        val concurrency = ticket.concurrency.coerceIn(1, chunks.size.coerceAtLeast(1))
+        val concurrency = ticket.concurrency.coerceIn(1, minOf(MAX_UPLOAD_CONCURRENCY, chunks.size.coerceAtLeast(1)))
+        mediaLogger.debug {
+            "QQ 官方机器人开始分片上传：type=${fileType.label} bytes=${hashes.sizeBytes} parts=${chunks.size} concurrency=$concurrency"
+        }
         val executor = Executors.newFixedThreadPool(concurrency) { runnable ->
             Thread(runnable, "qqbot-media-upload").apply { isDaemon = true }
         }
@@ -159,46 +170,83 @@ internal class QqBotMediaUploader(
         path: Path,
         chunk: QqBotUploadChunk,
     ) {
-        val deadline = System.nanoTime() + ticket.retryTimeoutSeconds.coerceAtLeast(0L) * NANOS_PER_SECOND
-        var attempt = 0
+        val bytes = FileChannel.open(path, StandardOpenOption.READ).use { channel ->
+            channel.readBytes(chunk.offset, chunk.sizeBytes)
+        }
+        require(bytes.size.toLong() == chunk.sizeBytes) {
+            "QQ 官方机器人分片读取大小不符：index=${chunk.part.index} expected=${chunk.sizeBytes} actual=${bytes.size}"
+        }
+        val finishRequest = QqBotUploadPartFinishRequest(
+            uploadId = ticket.uploadId,
+            partIndex = chunk.part.index,
+            blockSizeBytes = bytes.size.toLong(),
+            md5 = QqBotFileHasher.md5(bytes),
+        )
+        val startedAt = nowNanos()
+        val retryBudget = TimeUnit.SECONDS.toNanos(ticket.retryTimeoutSeconds.coerceAtLeast(0L))
+        val uploadTimeout = qqBotUploadPartTimeout(chunk.sizeBytes)
+        val host = URI.create(chunk.part.presignedUrl).host.orEmpty()
+        var uploaded = false
+        var attempt = 1
+        var phase = "上传"
+        var requestTimeout = uploadTimeout
+
+        fun remainingNanos(): Long = retryBudget - (nowNanos() - startedAt)
+
+        fun boundedTimeout(timeout: Duration): Duration {
+            // retry_timeout=0 表示不重试，首次请求仍使用正常超时。
+            if (retryBudget == 0L) return timeout
+            val remaining = remainingNanos()
+            if (remaining <= 0L) throw HttpTimeoutException("QQ 官方机器人分片重试窗口已结束")
+            return minOf(timeout, Duration.ofNanos(remaining))
+        }
+
         while (true) {
+            val attemptStartedAt = nowNanos()
             try {
-                FileChannel.open(path, StandardOpenOption.READ).use { channel ->
-                    val bytes = channel.readBytes(chunk.offset, chunk.sizeBytes)
-                    require(bytes.size.toLong() == chunk.sizeBytes) {
-                        "QQ 官方机器人分片读取大小不符：index=${chunk.part.index} expected=${chunk.sizeBytes} actual=${bytes.size}"
+                if (!uploaded) {
+                    phase = "上传"
+                    // 只在实际 PUT 时占用上行名额，确认请求和重试退避不阻塞其他目标。
+                    uploadSlots.acquire()
+                    try {
+                        requestTimeout = boundedTimeout(uploadTimeout)
+                        client.putUploadPart(chunk.part.presignedUrl, bytes, requestTimeout)
+                        uploaded = true
+                    } finally {
+                        uploadSlots.release()
                     }
-                    client.putUploadPart(chunk.part.presignedUrl, bytes)
-                    client.finishUploadPart(
-                        scope = scope,
-                        request = QqBotUploadPartFinishRequest(
-                            uploadId = ticket.uploadId,
-                            partIndex = chunk.part.index,
-                            blockSizeBytes = bytes.size.toLong(),
-                            md5 = QqBotFileHasher.md5(bytes),
-                        ),
-                    )
+                }
+                phase = "确认"
+                requestTimeout = boundedTimeout(QqBotOpenApiClient.UPLOAD_CONTROL_TIMEOUT)
+                client.finishUploadPart(scope, finishRequest, requestTimeout)
+                mediaLogger.debug {
+                    "QQ 官方机器人分片上传完成：index=${chunk.part.index} bytes=${chunk.sizeBytes} attempts=$attempt elapsedMs=${(nowNanos() - startedAt) / NANOS_PER_MILLISECOND} host=$host"
                 }
                 return
-            } catch (error: Throwable) {
+            } catch (error: Exception) {
                 if (error is InterruptedException) {
                     Thread.currentThread().interrupt()
                     throw error
                 }
-                val remaining = deadline - System.nanoTime()
-                if (remaining <= 0L || !isRetryableUploadFailure(error)) throw error
-                attempt += 1
-                val delayMillis = ticket.retryDelaySeconds.coerceAtLeast(1L) * MILLIS_PER_SECOND
-                val sleepMillis = minOf(delayMillis, (remaining / NANOS_PER_MILLISECOND).coerceAtLeast(1L))
+                val remaining = remainingNanos()
+                val delayMillis = TimeUnit.SECONDS.toMillis(ticket.retryDelaySeconds.coerceAtLeast(1L))
+                val context = "phase=$phase index=${chunk.part.index} bytes=${chunk.sizeBytes} attempt=$attempt " +
+                    "elapsedMs=${(nowNanos() - attemptStartedAt) / NANOS_PER_MILLISECOND} timeoutMs=${requestTimeout.toMillis()} host=$host"
+                if (remaining <= TimeUnit.MILLISECONDS.toNanos(delayMillis) || !isRetryableUploadFailure(error)) {
+                    mediaLogger.warn { "QQ 官方机器人分片$phase 失败，停止重试：$context，原因=${error.javaClass.simpleName}" }
+                    throw error
+                }
                 mediaLogger.warn(error) {
-                    "QQ 官方机器人分片上传失败，将重试：index=${chunk.part.index} attempt=$attempt delayMs=$sleepMillis"
+                    "QQ 官方机器人分片$phase 失败，将重试：$context delayMs=$delayMillis"
                 }
                 try {
-                    Thread.sleep(sleepMillis)
+                    sleepMillis(delayMillis)
                 } catch (error: InterruptedException) {
                     Thread.currentThread().interrupt()
                     throw error
                 }
+                if (remainingNanos() <= 0L) throw error
+                attempt += 1
             }
         }
     }
@@ -234,9 +282,8 @@ internal class QqBotMediaUploader(
     }
 
     private companion object {
+        private const val MAX_UPLOAD_CONCURRENCY: Int = 2
         private const val MAX_PART_BYTES: Long = 32L * 1024 * 1024
-        private const val MILLIS_PER_SECOND: Long = 1_000L
-        private const val NANOS_PER_SECOND: Long = 1_000_000_000L
         private const val NANOS_PER_MILLISECOND: Long = 1_000_000L
     }
 

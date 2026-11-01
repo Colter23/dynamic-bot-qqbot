@@ -1,5 +1,6 @@
 package top.colter.dynamic.qqbot
 
+import java.time.Duration
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
@@ -568,6 +569,7 @@ class QqBotOpenApiClientTest {
         assertEquals(2, ticket.concurrency)
         val sent = transport.posts.last()
         assertEquals("https://api.bot.qq.com/v2/users/user-openid/upload_prepare", sent.url)
+        assertEquals(Duration.ofSeconds(30), sent.timeout)
         val body = Json.parseToJsonElement(sent.body).jsonObject
         assertEquals(2, body.getValue("file_type").jsonPrimitive.int)
         assertEquals("15000000", body.getValue("file_size").jsonPrimitive.content)
@@ -592,6 +594,22 @@ class QqBotOpenApiClientTest {
         val put = transport.puts.single()
         assertEquals("https://cos.example.com/p1", put.url)
         assertEquals(listOf<Byte>(1, 2, 3), put.bytes.toList())
+        assertEquals(Duration.ofSeconds(60), put.timeout)
+    }
+
+    @Test
+    fun `分片上传透传剩余超时预算`() {
+        val transport = FakeQqBotHttpTransport(
+            putResponses = ArrayDeque(listOf(QqBotHttpResponse(200, ""))),
+        )
+        val client = QqBotOpenApiClient(
+            config = QqBotConfig(appId = "app-id", appSecret = "secret"),
+            transport = transport,
+        )
+
+        client.putUploadPart("https://cos.example.com/p1", byteArrayOf(1, 2, 3), Duration.ofSeconds(7))
+
+        assertEquals(Duration.ofSeconds(7), transport.puts.single().timeout)
     }
 
     @Test
@@ -621,6 +639,7 @@ class QqBotOpenApiClientTest {
 
         val sent = transport.posts.last()
         assertEquals("https://api.bot.qq.com/v2/groups/group-openid/upload_part_finish", sent.url)
+        assertEquals(Duration.ofSeconds(30), sent.timeout)
         val body = Json.parseToJsonElement(sent.body).jsonObject
         assertEquals("upload_1", body.getValue("upload_id").jsonPrimitive.content)
         assertEquals(0, body.getValue("part_index").jsonPrimitive.int)
@@ -867,6 +886,7 @@ internal data class RecordedPost(
     val url: String,
     val headers: Map<String, String>,
     val body: String,
+    val timeout: Duration? = null,
 )
 
 internal data class RecordedGet(
@@ -882,6 +902,7 @@ internal data class RecordedDelete(
 internal data class RecordedPut(
     val url: String,
     val bytes: ByteArray,
+    val timeout: Duration? = null,
 )
 
 internal class FakeQqBotHttpTransport(
@@ -900,6 +921,16 @@ internal class FakeQqBotHttpTransport(
         return postResponses.removeFirst()
     }
 
+    override fun postJsonWithTimeout(
+        url: String,
+        headers: Map<String, String>,
+        body: String,
+        timeout: Duration,
+    ): QqBotHttpResponse {
+        posts += RecordedPost(url = url, headers = headers, body = body, timeout = timeout)
+        return postResponses.removeFirst()
+    }
+
     override fun get(url: String, headers: Map<String, String>): QqBotHttpResponse {
         gets += RecordedGet(url = url, headers = headers)
         return getResponses.removeFirst()
@@ -912,6 +943,11 @@ internal class FakeQqBotHttpTransport(
 
     override fun putBytes(url: String, bytes: ByteArray): QqBotHttpResponse {
         puts += RecordedPut(url = url, bytes = bytes)
+        return putResponses.removeFirst()
+    }
+
+    override fun putBytesWithTimeout(url: String, bytes: ByteArray, timeout: Duration): QqBotHttpResponse {
+        puts += RecordedPut(url = url, bytes = bytes, timeout = timeout)
         return putResponses.removeFirst()
     }
 }

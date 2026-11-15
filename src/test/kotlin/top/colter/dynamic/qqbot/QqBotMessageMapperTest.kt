@@ -5,6 +5,7 @@ import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -126,7 +127,7 @@ class QqBotMessageMapperTest {
     }
 
     @Test
-    fun `被动回复超过平台限制时超出部分改为主动消息`() {
+    fun `被动回复超过平台限制时拒绝超出部分`() {
         val plan = (1..6).map { index ->
             QqBotSendPlanItem.Text(
                 QqBotSendRequest(
@@ -138,10 +139,13 @@ class QqBotMessageMapperTest {
         }
 
         val keeper = QqBotReplySeqKeeper()
-        val limited = plan.map { keeper.reserve("app", TargetAddress.of("qq-official", TargetKind.GROUP, "group"), it).item }
+        val target = TargetAddress.of("qq-official", TargetKind.GROUP, "group")
+        keeper.remember("app", target, "source-msg", System.currentTimeMillis() / 1000)
+        val limited = plan.take(5).map { keeper.reserve("app", target, it).item }
+        assertFailsWith<QqBotPassiveReplyException> { keeper.reserve("app", target, plan.last()) }
 
-        assertEquals(listOf("source-msg", "source-msg", "source-msg", "source-msg", "source-msg", null), limited.map { it.request.replyToMessageId })
-        assertEquals(listOf(1, 2, 3, 4, 5, 6), limited.map { it.request.msgSeq })
+        assertEquals(List(5) { "source-msg" }, limited.map { it.request.replyToMessageId })
+        assertEquals(listOf(1, 2, 3, 4, 5), limited.map { it.request.msgSeq })
     }
 
     @Test

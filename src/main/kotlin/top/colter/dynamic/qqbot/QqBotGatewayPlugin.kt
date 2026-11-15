@@ -355,6 +355,8 @@ public class QqBotGatewayPlugin :
             logger.debug { "忽略 QQ 官方机器人入站事件：type=${event.type}" }
             return
         }
+        retryReplySeqKeeper.remember(incoming.botAccountId ?: config.appId, incoming.target,
+            incoming.messageId, incoming.timestamp)
         logger.debug {
             "QQ 官方机器人入站消息已解析：messageId=${incoming.messageId.ifBlank { "-" }} target=${incoming.target.kind}:${incoming.target.externalId} sender=${incoming.senderId} ${incoming.mediaSummary()} text=${incoming.text.take(MAX_LOG_TEXT_CHARS)}"
         }
@@ -664,6 +666,7 @@ public class QqBotGatewayPlugin :
         plan.forEach { item ->
             val receipt = runCatching { sendWithMentionAllFallback(accountId, target, item, send) }
                 .getOrElse { error ->
+                    if (error is CancellationException) throw error
                     return if (receipts.isNotEmpty()) {
                         MessageSendResult.partiallySent(
                             receipts = receipts.map { receipt ->
@@ -675,6 +678,7 @@ public class QqBotGatewayPlugin :
                                 )
                             },
                             reason = error.sendOutcomeDescription(failureLabel),
+                            routeFailure = error.isRouteFailure(),
                         )
                     } else if (error.isSendOutcomeUnknown()) {
                         // 超时/连接中断等状态未知场景：服务器可能已收到消息，按未知上报避免重复推送
@@ -689,6 +693,7 @@ public class QqBotGatewayPlugin :
                         MessageSendResult.failed(
                             reason = error.sendOutcomeDescription(failureLabel),
                             retryable = retryable,
+                            routeFailure = error.isRouteFailure(),
                         )
                     }
                 }
@@ -739,9 +744,6 @@ public class QqBotGatewayPlugin :
     ): QqBotSendReceipt {
         val reservation = retryReplySeqKeeper.reserve(accountId, target, item)
         val allocated = reservation.item
-        if (item.request.replyToMessageId != null && allocated.request.replyToMessageId == null) {
-            logger.warn { "QQ 官方机器人被动回复超过平台限制，改为主动消息：target=${target.stableValue()}" }
-        }
         return try {
             send(allocated)
         } catch (error: Throwable) {
@@ -782,8 +784,15 @@ public class QqBotGatewayPlugin :
     }
 
     private fun Throwable.retryableForDelivery(): Boolean {
+        if (findCause<QqBotPassiveReplyException>() != null) return false
         findCause<QqBotMediaPreparationException>()?.let { return it.retryable }
         return (this as? QqBotOpenApiException)?.retryable ?: true
+    }
+
+    private fun Throwable.isRouteFailure(): Boolean {
+        if (findCause<QqBotPassiveReplyException>() != null) return false
+        val api = findCause<QqBotOpenApiException>() ?: return true
+        return api.retryable
     }
 
     private inline fun <reified T : Throwable> Throwable.findCause(): T? {

@@ -29,6 +29,8 @@ import top.colter.dynamic.core.plugin.MessageSinkMediaDeliveryProbeStatus
 import top.colter.dynamic.core.plugin.MessageSinkRouteState
 
 class QqBotGatewayPluginSendTest {
+    private var activeKeeper: QqBotReplySeqKeeper? = null
+
     @Test
     fun `普通发送单聊文本并返回回执`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
@@ -50,7 +52,7 @@ class QqBotGatewayPluginSendTest {
     }
 
     @Test
-    fun `群聊被动回复超过五条后剩余消息改为主动消息`() = runBlocking {
+    fun `群聊被动回复超过五条后返回部分成功`() = runBlocking {
         val plugin = QqBotGatewayPlugin().prepareSendTest()
         val gateway = FakeGateway()
         plugin.setPrivate("gateway", gateway)
@@ -67,9 +69,9 @@ class QqBotGatewayPluginSendTest {
             routeId = "qqbot:qq-official:app-id",
         )
 
-        assertIs<MessageSendResult.Sent>(result)
+        assertFalse(assertIs<MessageSendResult.PartiallySent>(result).routeFailure)
         assertEquals(
-            listOf("source-msg", "source-msg", "source-msg", "source-msg", "source-msg", null),
+            listOf("source-msg", "source-msg", "source-msg", "source-msg", "source-msg"),
             gateway.sentRequests.map { it.replyToMessageId },
         )
     }
@@ -87,10 +89,10 @@ class QqBotGatewayPluginSendTest {
                 batches = (1..count).map { MessageBatch(listOf(MessageContent.Text("回复$it"))) },
                 replyToMessageId = "source-msg",
             ), routeId = "qqbot:qq-official:app-id")
-            assertIs<MessageSendResult.Sent>(result)
+            if (count == 4) assertIs<MessageSendResult.Sent>(result) else assertIs<MessageSendResult.PartiallySent>(result)
         }
 
-        assertEquals(listOf("source-msg", "source-msg", "source-msg", "source-msg", "source-msg", null), gateway.sentRequests.map { it.replyToMessageId })
+        assertEquals(List(5) { "source-msg" }, gateway.sentRequests.map { it.replyToMessageId })
         assertEquals(listOf(1, 2, 3, 4, 5), gateway.sentRequests.filter { it.replyToMessageId != null }.map { it.msgSeq })
     }
 
@@ -108,9 +110,12 @@ class QqBotGatewayPluginSendTest {
             ))),
         )
 
-        repeat(5) { assertIs<MessageSendResult.Sent>(plugin.sendMessage(request, "qqbot:qq-official:app-id")) }
+        repeat(4) { assertIs<MessageSendResult.Sent>(plugin.sendMessage(request, "qqbot:qq-official:app-id")) }
+        val rejected = assertIs<MessageSendResult.Failed>(plugin.sendMessage(request, "qqbot:qq-official:app-id"))
+        assertFalse(rejected.retryable)
+        assertFalse(rejected.routeFailure)
 
-        assertEquals(listOf("embedded-reply", "embedded-reply", "embedded-reply", "embedded-reply", null), gateway.sentRequests.map { it.replyToMessageId })
+        assertEquals(listOf("embedded-reply", "embedded-reply", "embedded-reply", "embedded-reply"), gateway.sentRequests.map { it.replyToMessageId })
         assertEquals(listOf(1, 2, 3, 4), gateway.sentRequests.filter { it.replyToMessageId != null }.map { it.msgSeq })
     }
 
@@ -129,9 +134,9 @@ class QqBotGatewayPluginSendTest {
             replyToMessageId = "source-msg",
         )
 
-        assertIs<MessageSendResult.Sent>(plugin.sendMessage(request, "qqbot:qq-official:app-id"))
+        assertIs<MessageSendResult.PartiallySent>(plugin.sendMessage(request, "qqbot:qq-official:app-id"))
 
-        assertEquals(listOf("source-msg", "source-msg", "source-msg", "source-msg", "source-msg", null), gateway.sentRequests.map { it.replyToMessageId })
+        assertEquals(List(5) { "source-msg" }, gateway.sentRequests.map { it.replyToMessageId })
         assertEquals(listOf(1, 2, 3, 4, 5), gateway.sentRequests.filter { it.replyToMessageId != null }.map { it.msgSeq })
     }
 
@@ -404,7 +409,7 @@ class QqBotGatewayPluginSendTest {
                         "content":"翻译我",
                         "message_type":0,
                         "message_scene":{"source":"default","ext":["msg_idx=REFIDX_self=="]},
-                        "timestamp":"2026-06-19T04:00:00Z"
+                        "timestamp":"${java.time.Instant.now()}"
                       }
                     }
                 """.trimIndent(),
@@ -548,8 +553,8 @@ class QqBotGatewayPluginSendTest {
                 replyToMessageId = "source-msg",
             ), "qqbot:qq-official:app-id")
 
-            assertIs<MessageSendResult.Sent>(result)
-            assertEquals(List(limit) { "source-msg" } + null, gateway.sentRequests.map { it.replyToMessageId })
+            assertIs<MessageSendResult.PartiallySent>(result)
+            assertEquals(List(limit) { "source-msg" }, gateway.sentRequests.map { it.replyToMessageId })
             assertEquals((7..(6 + limit)).toList(), gateway.sentRequests.take(limit).map { it.msgSeq })
         }
     }
@@ -576,7 +581,29 @@ class QqBotGatewayPluginSendTest {
 
         val failed = assertIs<MessageSendResult.Failed>(result)
         assertEquals(false, failed.retryable)
+        assertFalse(failed.routeFailure)
         assertEquals(true, failed.reason.contains("回复消息msg_id已过期"))
+    }
+
+    @Test
+    fun `本地回复窗口过期返回消息拒绝且下一条消息仍可发送`() = runBlocking {
+        val plugin = QqBotGatewayPlugin().prepareSendTest()
+        val gateway = FakeGateway()
+        val keeper = QqBotReplySeqKeeper(nowEpochMillis = { 1_000_000L })
+        plugin.setPrivate("gateway", gateway)
+        plugin.setPrivate("running", true)
+        plugin.setPrivate("retryReplySeqKeeper", keeper)
+        val target = TargetAddress.of("qq-official", TargetKind.GROUP, "group")
+        keeper.remember("app-id", target, "old", 1L)
+        val result = plugin.sendMessage(sendRequest(target, listOf(MessageBatch(listOf(MessageContent.Text("旧回复")))), "old"),
+            "qqbot:qq-official:app-id")
+        assertFalse(assertIs<MessageSendResult.Failed>(result).routeFailure)
+        assertFalse(result.retryable)
+        assertTrue(gateway.sentRequests.isEmpty())
+        keeper.remember("app-id", target, "new", 1_000L)
+        assertIs<MessageSendResult.Sent>(plugin.sendMessage(
+            sendRequest(target, listOf(MessageBatch(listOf(MessageContent.Text("新回复")))), "new"), "qqbot:qq-official:app-id"))
+        assertEquals("new", gateway.sentRequests.single().replyToMessageId)
     }
 
     @Test
@@ -1049,6 +1076,9 @@ class QqBotGatewayPluginSendTest {
 
     private fun QqBotGatewayPlugin.prepareSendTest(): QqBotGatewayPlugin {
         setPrivate("config", QqBotConfig())
+        val keeper = QqBotReplySeqKeeper()
+        setPrivate("retryReplySeqKeeper", keeper)
+        activeKeeper = keeper
         return this
     }
 
@@ -1077,6 +1107,12 @@ class QqBotGatewayPluginSendTest {
         batches: List<MessageBatch>,
         replyToMessageId: String? = null,
     ): MessageSendRequest {
+        if (replyToMessageId != null) {
+            activeKeeper?.remember("app-id", target, replyToMessageId, System.currentTimeMillis() / 1000)
+        }
+        batches.flatMap { it.content }.filterIsInstance<MessageContent.Reply>().forEach {
+            activeKeeper?.remember("app-id", target, it.messageId, System.currentTimeMillis() / 1000)
+        }
         val message = Message(
             id = "message-1",
             time = 1,

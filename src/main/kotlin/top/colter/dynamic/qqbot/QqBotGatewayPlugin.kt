@@ -15,6 +15,8 @@ import top.colter.dynamic.core.config.ConfigurablePlugin
 import top.colter.dynamic.core.config.loadOrCreate
 import top.colter.dynamic.core.data.IncomingMessage
 import top.colter.dynamic.core.data.IncomingMessageSegment
+import top.colter.dynamic.core.data.MediaKind
+import top.colter.dynamic.core.data.MediaRef
 import top.colter.dynamic.core.data.MessageContent
 import top.colter.dynamic.core.data.PlatformId
 import top.colter.dynamic.core.data.TargetAddress
@@ -69,6 +71,7 @@ public class QqBotGatewayPlugin :
     private val messageIndexKeeper = QqBotMessageIndexKeeper()
     private val mentionAllQuota = QqBotMentionAllQuota()
     private val groupInfoRateLimiter = QqBotIntervalRateLimiter(GROUP_INFO_REQUEST_INTERVAL_MILLIS)
+    private val userInfoRateLimiter = QqBotIntervalRateLimiter(USER_INFO_REQUEST_INTERVAL_MILLIS)
     private var targetLedger: QqBotTargetLedger? = null
 
     override val configId: String
@@ -351,6 +354,7 @@ public class QqBotGatewayPlugin :
                 logger.warn(error) { "QQ 官方机器人入站消息解析失败：type=${event.type}" }
             }
             .getOrNull()
+            ?.withCachedSenderProfile()
         if (incoming == null) {
             logger.debug { "忽略 QQ 官方机器人入站事件：type=${event.type}" }
             return
@@ -400,7 +404,13 @@ public class QqBotGatewayPlugin :
             if (removed) {
                 ledger.markRemoved(sighting.kind, sighting.externalId)
             } else {
-                ledger.record(sighting.kind, sighting.externalId)
+                ledger.record(
+                    kind = sighting.kind,
+                    externalId = sighting.externalId,
+                    name = sighting.name,
+                    avatar = sighting.avatar,
+                    unionOpenId = sighting.unionOpenId,
+                )
             }
         }.onFailure { error ->
             logger.warn(error) { "QQ 官方机器人目标账本记录失败：type=${event.type}" }
@@ -416,10 +426,10 @@ public class QqBotGatewayPlugin :
     }
 
     /**
-     * 目标缺少展示名时补全资料，让后台显示群名称而不是一串 OpenID。
+     * 目标缺少名称或头像时补全资料。
      *
-     * 官方只有群资料接口（且为白名单能力），好友/用户没有对应接口，因此只处理群目标。
-     * 是否真的发起请求由 [QqBotTargetLedger.tryBeginInfoRequest] 决定：已取到名称、已有请求
+     * 单聊事件自带资料优先入账；用户缺昵称或头像时才调用好友资料接口。
+     * 是否真的发起请求由 [QqBotTargetLedger.tryBeginInfoRequest] 决定：资料完整、已有请求
      * 在途、或仍在失败冷却期时都会被挡掉，避免同一目标被并发重复请求。
      */
     private fun requestTargetInfo(
@@ -428,14 +438,23 @@ public class QqBotGatewayPlugin :
         externalId: String,
     ) {
         if (!running) return
-        if (kind != TargetKind.GROUP) return
+        if (!ledger.needsInfo(kind, externalId)) return
         val accountId = config.appId.trim().takeIf { it.isNotBlank() } ?: return
         val scope = incomingScope ?: return
-        scope.launch { fetchGroupInfo(ledger, accountId, externalId) }
+        scope.launch { fetchTargetInfo(ledger, accountId, kind, externalId) }
+    }
+
+    private fun IncomingMessage.withCachedSenderProfile(): IncomingMessage {
+        if (target.kind != TargetKind.USER) return this
+        val cached = targetLedger?.findCandidate(target) ?: return this
+        return copy(
+            senderName = senderName ?: cached.name.takeIf { it != target.externalId },
+            senderAvatar = senderAvatar ?: cached.avatar,
+        )
     }
 
     /**
-     * 启动后的收尾任务：等网关就绪后先预热平台账号资料，再补全历史遗留的未命名群。
+     * 启动后等网关就绪，预热平台账号并补全群和好友缺失的资料。
      *
      * 预热是必要的：[QqBotGateway.availableAccounts] 内部会拉一次 `GET /users/@me`，
      * 而它在发送路径（`isAccountReady`）与后台账号查询里都会被调用；不预热的话，
@@ -446,9 +465,9 @@ public class QqBotGatewayPlugin :
         val ledger = targetLedger
         val pending = ledger?.let { target ->
             runCatching {
-                target.listCandidates(TargetKind.GROUP)
-                    .map { it.address.externalId }
-                    .filter { groupOpenid -> target.needsInfo(TargetKind.GROUP, groupOpenid) }
+                target.listCandidates(null)
+                    .map { it.address }
+                    .filter { address -> target.needsInfo(address.kind, address.externalId) }
             }.getOrDefault(emptyList())
         }.orEmpty()
 
@@ -457,18 +476,67 @@ public class QqBotGatewayPlugin :
             val accountId = awaitReadyAccountId() ?: run {
                 logger.warn {
                     "QQ 官方机器人网关在 ${ACCOUNT_READY_TIMEOUT_MILLIS / 1000}s 内未就绪，" +
-                        "跳过平台账号预热与群资料补全（待补全群数=${pending.size}）"
+                        "跳过平台账号预热与目标资料补全（待补全目标数=${pending.size}）"
                 }
                 return@launch
             }
             warmUpPlatformAccount()
             if (ledger == null || pending.isEmpty()) return@launch
-            logger.info { "QQ 官方机器人开始补全群资料：count=${pending.size} account=$accountId" }
-            pending.forEach { groupOpenid ->
-                // 群多时避免启动瞬间连打一串请求
-                fetchGroupInfo(ledger, accountId, groupOpenid)
+            logger.info { "QQ 官方机器人开始补全目标资料：count=${pending.size} account=$accountId" }
+            pending.forEach { address ->
+                fetchTargetInfo(ledger, accountId, address.kind, address.externalId)
             }
         }
+    }
+
+    private suspend fun fetchTargetInfo(
+        ledger: QqBotTargetLedger,
+        accountId: String,
+        kind: TargetKind,
+        externalId: String,
+    ) {
+        when (kind) {
+            TargetKind.GROUP -> fetchGroupInfo(ledger, accountId, externalId)
+            TargetKind.USER -> fetchUserInfo(ledger, accountId, externalId)
+            else -> Unit
+        }
+    }
+
+    private suspend fun fetchUserInfo(
+        ledger: QqBotTargetLedger,
+        accountId: String,
+        userOpenid: String,
+    ) {
+        if (!ledger.tryBeginInfoRequest(TargetKind.USER, userOpenid)) return
+        val info = try {
+            userInfoRateLimiter.withPermit {
+                if (!ledger.shouldContinueInfoRequest(TargetKind.USER, userOpenid)) {
+                    ledger.abandonInfoRequest(TargetKind.USER, userOpenid)
+                    return
+                }
+                gateway.userInfo(accountId, userOpenid)
+            }
+        } catch (error: CancellationException) {
+            ledger.abandonInfoRequest(TargetKind.USER, userOpenid)
+            throw error
+        } catch (error: Throwable) {
+            val cooldownSeconds = infoRetryCooldownSeconds(error)
+            ledger.recordInfo(
+                TargetKind.USER, userOpenid, name = null,
+                retryAfterEpochSeconds = System.currentTimeMillis() / 1000 + cooldownSeconds,
+            )
+            logger.warn(error) {
+                "QQ 官方机器人用户资料获取失败（${cooldownSeconds}s 后重试）：user=$userOpenid"
+            }
+            return
+        }
+        ledger.recordInfo(
+            kind = TargetKind.USER,
+            externalId = userOpenid,
+            name = info?.name,
+            avatar = info?.avatar?.takeIf(String::isNotBlank)?.let { MediaRef(it, MediaKind.AVATAR) },
+            retryAfterEpochSeconds = System.currentTimeMillis() / 1000 + INFO_RETRY_PERMANENT_SECONDS,
+        )
     }
 
     /** 预热平台账号资料；失败已在网关内部兜住并记 WARN，这里只保证不中断启动。 */
@@ -504,9 +572,14 @@ public class QqBotGatewayPlugin :
         groupOpenid: String,
     ) {
         if (!ledger.tryBeginInfoRequest(TargetKind.GROUP, groupOpenid)) return
-        val nowEpochSeconds = System.currentTimeMillis() / 1000
         val info = try {
-            groupInfoRateLimiter.withPermit { gateway.groupInfo(accountId, groupOpenid) }
+            groupInfoRateLimiter.withPermit {
+                if (!ledger.shouldContinueInfoRequest(TargetKind.GROUP, groupOpenid)) {
+                    ledger.abandonInfoRequest(TargetKind.GROUP, groupOpenid)
+                    return
+                }
+                gateway.groupInfo(accountId, groupOpenid)
+            }
         } catch (error: CancellationException) {
             // 插件停止：释放名额后原样抛出，不登记任何冷却
             ledger.abandonInfoRequest(TargetKind.GROUP, groupOpenid)
@@ -517,7 +590,7 @@ public class QqBotGatewayPlugin :
                 kind = TargetKind.GROUP,
                 externalId = groupOpenid,
                 name = null,
-                retryAfterEpochSeconds = nowEpochSeconds + cooldownSeconds,
+                retryAfterEpochSeconds = System.currentTimeMillis() / 1000 + cooldownSeconds,
             )
             logger.warn(error) {
                 "QQ 官方机器人群资料获取失败（${cooldownSeconds}s 后重试），展示名继续使用 OpenID：group=$groupOpenid"
@@ -525,6 +598,7 @@ public class QqBotGatewayPlugin :
             return
         }
 
+        val nowEpochSeconds = System.currentTimeMillis() / 1000
         val name = info?.name?.trim()?.takeIf { it.isNotBlank() }
         when {
             // 网关不支持资料查询：长期不再尝试
@@ -544,6 +618,7 @@ public class QqBotGatewayPlugin :
                     externalId = groupOpenid,
                     name = null,
                     retryAfterEpochSeconds = nowEpochSeconds + INFO_RETRY_PERMANENT_SECONDS,
+                    unionOpenId = info.unionOpenId,
                 )
                 logger.warn {
                     "QQ 官方机器人群信息未返回群名称，展示名继续使用 OpenID：" +
@@ -551,7 +626,7 @@ public class QqBotGatewayPlugin :
                 }
             }
             else -> {
-                ledger.recordInfo(TargetKind.GROUP, groupOpenid, name)
+                ledger.recordInfo(TargetKind.GROUP, groupOpenid, name, unionOpenId = info.unionOpenId)
                 logger.info {
                     "QQ 官方机器人群资料已补全：name=$name members=${info.memberCount ?: "-"} group=$groupOpenid"
                 }
@@ -862,14 +937,15 @@ internal fun createQqBotGateway(config: QqBotConfig): QqBotGateway {
 /** 调试级日志中入站文本的截断长度，避免日志被超长消息刷屏。 */
 private const val MAX_LOG_TEXT_CHARS: Int = 200
 
-/** 启动补全群资料时等待网关就绪的上限与轮询间隔。 */
+/** 启动补全目标资料时等待网关就绪的上限与轮询间隔。 */
 private const val ACCOUNT_READY_TIMEOUT_MILLIS: Long = 60_000L
 private const val ACCOUNT_READY_POLL_MILLIS: Long = 1_000L
 
 /** 启动补全群资料时，相邻两次请求之间的间隔（群多时不至于启动瞬间连打一串请求）。 */
 private const val GROUP_INFO_REQUEST_INTERVAL_MILLIS: Long = 2_100L
+private const val USER_INFO_REQUEST_INTERVAL_MILLIS: Long = 110L
 
-/** 群资料拉取失败后的重试冷却：语义明确的业务码失败（多半无权限）按长期，其余按短退避。 */
+/** 目标资料拉取失败后的重试冷却：语义明确的业务码失败按长期，其余按短退避。 */
 private const val INFO_RETRY_PERMANENT_SECONDS: Long = 24L * 60 * 60
 private const val INFO_RETRY_TRANSIENT_SECONDS: Long = 10L * 60
 
@@ -881,7 +957,7 @@ private val INFO_RETRY_TRANSIENT_CODES: Set<String> = setOf("40034100")
 
 /** HTTP 429 频率限制。 */
 private const val HTTP_TOO_MANY_REQUESTS: Int = 429
-/** 资料接口按 30 QPM 限制；所有实时与启动补全请求共用一个串行间隔器。 */
+/** 同一接口的实时与启动补全共用一个串行间隔器。 */
 private class QqBotIntervalRateLimiter(
     private val intervalMillis: Long,
     private val nowMillis: () -> Long = { System.currentTimeMillis() },
@@ -889,7 +965,7 @@ private class QqBotIntervalRateLimiter(
     private val lock = Mutex()
     private var nextAllowedAtMillis: Long = 0L
 
-    suspend fun <T> withPermit(block: suspend () -> T): T = lock.withLock {
+    suspend inline fun <T> withPermit(block: () -> T): T = lock.withLock {
         val now = nowMillis()
         val waitMillis = (nextAllowedAtMillis - now).coerceAtLeast(0L)
         nextAllowedAtMillis = maxOf(now, nextAllowedAtMillis) + intervalMillis

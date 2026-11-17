@@ -5,6 +5,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import top.colter.dynamic.core.data.IncomingMessageSegment
+import top.colter.dynamic.core.data.MediaKind
 import top.colter.dynamic.core.data.TargetKind
 
 class QqBotIncomingMessageMapperTest {
@@ -21,7 +22,7 @@ class QqBotIncomingMessageMapperTest {
                       "t":"C2C_MESSAGE_CREATE",
                       "d":{
                         "id":"msg-1",
-                        "author":{"user_openid":"user-openid"},
+                        "author":{"user_openid":"user-openid","username":" 测试用户 ","avatar":"http://thirdqq.qlogo.cn/avatar"},
                         "content":"hello",
                         "timestamp":"2026-06-19T04:00:00Z"
                       }
@@ -36,6 +37,9 @@ class QqBotIncomingMessageMapperTest {
         assertEquals("user-openid", incoming.target.externalId)
         assertEquals("bot-app-id", incoming.target.accountId)
         assertEquals("user-openid", incoming.senderId)
+        assertEquals("测试用户", incoming.senderName)
+        assertEquals("https://thirdqq.qlogo.cn/avatar", incoming.senderAvatar?.uri)
+        assertEquals(MediaKind.AVATAR, incoming.senderAvatar?.kind)
         assertEquals("bot-app-id", incoming.botAccountId)
         assertEquals("msg-1", incoming.messageId)
         assertEquals(1_781_841_600L, incoming.timestamp)
@@ -58,7 +62,7 @@ class QqBotIncomingMessageMapperTest {
                       "d":{
                         "id":"group-msg-1",
                         "group_openid":"group-openid",
-                        "author":{"member_openid":"member-openid"},
+                        "author":{"member_openid":"member-openid","username":"用户昵称","member_nickname":" 群内昵称 ","avatar":"https://thirdqq.qlogo.cn/group-avatar"},
                         "content":"@bot 看图",
                         "timestamp":"2026-06-19T04:00:30Z",
                         "attachments":[
@@ -76,6 +80,8 @@ class QqBotIncomingMessageMapperTest {
         assertEquals(TargetKind.GROUP, incoming.target.kind)
         assertEquals("group-openid", incoming.target.externalId)
         assertEquals("member-openid", incoming.senderId)
+        assertEquals("群内昵称", incoming.senderName)
+        assertEquals("https://thirdqq.qlogo.cn/group-avatar", incoming.senderAvatar?.uri)
         assertEquals("group-msg-1", incoming.messageId)
         assertEquals(1_781_841_630L, incoming.timestamp)
         assertEquals("@bot 看图", incoming.text)
@@ -106,6 +112,7 @@ class QqBotIncomingMessageMapperTest {
                         "author":{
                           "member_openid":"member-openid",
                           "union_openid":"member-openid",
+                          "member_nickname":"   ",
                           "username":"Colter"
                         },
                         "content":"测试",
@@ -122,6 +129,8 @@ class QqBotIncomingMessageMapperTest {
         assertEquals("2200000000000000F189092", incoming.target.externalId)
         assertEquals("member-openid", incoming.senderId)
         assertEquals("group-msg-2", incoming.messageId)
+        assertEquals("Colter", incoming.senderName)
+        assertNull(incoming.senderAvatar)
         assertEquals("测试", incoming.text)
         assertEquals(emptySet(), incoming.mentions)
     }

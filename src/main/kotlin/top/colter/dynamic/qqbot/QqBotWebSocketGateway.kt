@@ -145,6 +145,12 @@ internal class QqBotWebSocketGateway(
             openApiClient.groupInfo(groupOpenid)
         }
 
+    override suspend fun userInfo(accountId: String, userOpenid: String): QqBotUserInfo? =
+        withContext(Dispatchers.IO) {
+            requireAccount(accountId)
+            openApiClient.userInfo(userOpenid)
+        }
+
     private suspend fun sendText(
         scope: QqBotOpenApiScope,
         accountId: String,

@@ -2,6 +2,8 @@ package top.colter.dynamic.qqbot
 
 import kotlinx.serialization.Serializable
 import top.colter.dynamic.core.config.PluginDataStore
+import top.colter.dynamic.core.data.MediaKind
+import top.colter.dynamic.core.data.MediaRef
 import top.colter.dynamic.core.data.TargetAddress
 import top.colter.dynamic.core.data.TargetKind
 import top.colter.dynamic.core.plugin.MessageTargetCandidate
@@ -20,14 +22,17 @@ private val logger = loggerFor<QqBotTargetLedger>()
  * - 目标失联（移出群/删除好友）直接删除 key，不再用 `:REMOVED` 后缀把布尔语义塞进
  *   字符串字段。
  *
- * 结果：重复 sighting 是空操作，只有"新目标"或"补到名称"时才落盘。
+ * 重复 sighting 是空操作，只有新目标或资料变化时才落盘。
  */
 @Serializable
 internal data class QqBotTargetLedgerState(
     /** 群 openid -> 群名称（未知时为空串）。 */
     val groups: MutableMap<String, String> = mutableMapOf(),
-    /** 用户 openid -> 昵称（官方无资料接口，通常为空串）。 */
+    /** 用户 openid -> 昵称（未知时为空串）。 */
     val users: MutableMap<String, String> = mutableMapOf(),
+    val userAvatars: MutableMap<String, MediaRef> = mutableMapOf(),
+    /** 群 OpenID -> 跨应用统一标识；发送消息仍使用群 OpenID。 */
+    val groupUnionOpenIds: MutableMap<String, String> = mutableMapOf(),
 )
 
 /**
@@ -65,7 +70,7 @@ internal class QqBotTargetLedger(
      * 不落盘是有意的：这个值只用来避免同一次运行内反复打平台接口，重启后允许每个
      * 目标再试一次，省掉一个持久化字段。
      */
-    private val infoRetryAfterEpochSeconds: MutableMap<String, Long> = mutableMapOf()
+    private val infoRetryAfterEpochSeconds: MutableMap<TargetAddress, Long> = mutableMapOf()
 
     /**
      * 正在进行中的资料请求，**仅存内存**。
@@ -74,23 +79,40 @@ internal class QqBotTargetLedger(
      * 这段网络往返里，该群每来一条消息都会再触发一次请求（群资料接口是白名单能力，有频控）。
      * 由 [tryBeginInfoRequest] 占位，[recordInfo] / [abandonInfoRequest] 释放。
      */
-    private val infoRequestsInFlight: MutableSet<String> = mutableSetOf()
+    private val infoRequestsInFlight: MutableSet<TargetAddress> = mutableSetOf()
 
     init {
         state = loadState()
     }
 
-    /** 记录一次目标 sighting；返回是否为新目标。已存在的目标不做任何改动，也不落盘。 */
-    fun record(kind: TargetKind, externalId: String): Boolean {
+    /** 记录事件自带的最新资料；返回是否为新目标，重复资料不落盘。 */
+    fun record(
+        kind: TargetKind,
+        externalId: String,
+        name: String? = null,
+        avatar: MediaRef? = null,
+        unionOpenId: String? = null,
+    ): Boolean {
         if (!isSupported(kind)) return false
         val id = externalId.trim()
         require(id.isNotBlank()) { "目标 OpenID 不能为空" }
         synchronized(lock) {
             val targets = targetsOf(kind)
-            if (targets.containsKey(id)) return false
-            targets[id] = ""
-            persistLocked()
-            return true
+            val added = !targets.containsKey(id)
+            if (added) targets[id] = ""
+            var changed = added
+            val resolvedName = name?.trim()?.takeIf(String::isNotBlank)
+            if (resolvedName != null && targets[id] != resolvedName) {
+                targets[id] = resolvedName
+                changed = true
+            }
+            if (kind == TargetKind.USER && avatar != null && state.userAvatars[id] != avatar) {
+                state.userAvatars[id] = avatar
+                changed = true
+            }
+            if (kind == TargetKind.GROUP && recordUnionOpenIdLocked(id, unionOpenId)) changed = true
+            if (changed) persistLocked()
+            return added
         }
     }
 
@@ -101,8 +123,11 @@ internal class QqBotTargetLedger(
         synchronized(lock) {
             val targets = targetsOf(kind)
             if (targets.remove(id) == null) return false
-            infoRetryAfterEpochSeconds.remove(id)
-            infoRequestsInFlight.remove(id)
+            val key = infoKey(kind, id)
+            infoRetryAfterEpochSeconds.remove(key)
+            infoRequestsInFlight.remove(key)
+            if (kind == TargetKind.USER) state.userAvatars.remove(id)
+            if (kind == TargetKind.GROUP) state.groupUnionOpenIds.remove(id)
             persistLocked()
             return true
         }
@@ -133,6 +158,7 @@ internal class QqBotTargetLedger(
             return MessageTargetCandidate(
                 address = address.copy(accountId = address.accountId?.trim()?.takeIf { it.isNotBlank() }),
                 name = name.displayNameOr(id),
+                avatar = if (address.kind == TargetKind.USER) state.userAvatars[id] else null,
             )
         }
     }
@@ -142,14 +168,14 @@ internal class QqBotTargetLedger(
     /**
      * 该目标是否还需要拉取资料（只读判断，不占位）。
      *
-     * 只有群有官方资料接口；已拿到名称、已有请求在途、或仍在失败冷却期内都返回 false。
+     * 群需要名称，好友需要昵称和头像；已有请求在途或仍在失败冷却期内返回 false。
      */
     fun needsInfo(kind: TargetKind, externalId: String, nowEpochSeconds: Long? = null): Boolean {
-        if (kind != TargetKind.GROUP) return false
+        if (!isSupported(kind)) return false
         val id = externalId.trim()
         val now = nowEpochSeconds ?: this.nowEpochSeconds()
         synchronized(lock) {
-            return needsInfoLocked(id, now)
+            return needsInfoLocked(kind, id, now)
         }
     }
 
@@ -165,39 +191,50 @@ internal class QqBotTargetLedger(
         externalId: String,
         nowEpochSeconds: Long? = null,
     ): Boolean {
-        if (kind != TargetKind.GROUP) return false
+        if (!isSupported(kind)) return false
         val id = externalId.trim()
         val now = nowEpochSeconds ?: this.nowEpochSeconds()
         synchronized(lock) {
-            if (!needsInfoLocked(id, now)) return false
-            infoRequestsInFlight.add(id)
+            if (!needsInfoLocked(kind, id, now)) return false
+            infoRequestsInFlight.add(infoKey(kind, id))
             return true
         }
     }
 
     /** 放弃一个已抢占的资料请求名额（请求被取消、没有结果可登记时使用）。 */
     fun abandonInfoRequest(kind: TargetKind, externalId: String) {
-        if (kind != TargetKind.GROUP) return
+        if (!isSupported(kind)) return
         val id = externalId.trim()
         synchronized(lock) {
-            infoRequestsInFlight.remove(id)
+            infoRequestsInFlight.remove(infoKey(kind, id))
+        }
+    }
+
+    /** 限频等待结束后复查已占位的请求；忽略该请求自身的在途标记。 */
+    fun shouldContinueInfoRequest(kind: TargetKind, externalId: String): Boolean {
+        if (!isSupported(kind)) return false
+        val id = externalId.trim()
+        synchronized(lock) {
+            val key = infoKey(kind, id)
+            return key in infoRequestsInFlight && needsInfoLocked(kind, id, nowEpochSeconds(), ignoreInFlight = true)
         }
     }
 
     /** [needsInfo] 与 [tryBeginInfoRequest] 共用的判断；调用方必须持有 [lock]。 */
-    private fun needsInfoLocked(id: String, now: Long): Boolean {
-        val name = state.groups[id] ?: return false
-        if (name.isNotBlank()) return false
-        if (infoRequestsInFlight.contains(id)) return false
-        val retryAfter = infoRetryAfterEpochSeconds[id] ?: return true
+    private fun needsInfoLocked(kind: TargetKind, id: String, now: Long, ignoreInFlight: Boolean = false): Boolean {
+        val name = targetsOf(kind)[id] ?: return false
+        if (name.isNotBlank() && (kind == TargetKind.GROUP || state.userAvatars[id] != null)) return false
+        val key = infoKey(kind, id)
+        if (!ignoreInFlight && infoRequestsInFlight.contains(key)) return false
+        val retryAfter = infoRetryAfterEpochSeconds[key] ?: return true
         return now >= retryAfter
     }
 
     /**
      * 记录一次资料拉取结果，返回落盘内容是否变化。
      *
-     * [name] 非空表示成功，写入展示名并清除冷却；为空表示这次没取到，只登记内存冷却
-     * （[retryAfterEpochSeconds] 为空表示本次运行内不再重试）。
+     * 只补充缺少的昵称/头像，避免覆盖请求期间收到的事件资料；群统一标识独立保存。
+     * 未补齐资料时登记内存冷却，避免部分资料缺失导致每条消息都查询接口。
      *
      * 无论成功失败都会释放 [tryBeginInfoRequest] 抢占的名额。
      */
@@ -206,22 +243,34 @@ internal class QqBotTargetLedger(
         externalId: String,
         name: String?,
         retryAfterEpochSeconds: Long? = null,
+        avatar: MediaRef? = null,
+        unionOpenId: String? = null,
     ): Boolean {
-        if (kind != TargetKind.GROUP) return false
+        if (!isSupported(kind)) return false
         val id = externalId.trim()
         val resolved = name?.trim()?.takeIf { it.isNotBlank() }
         synchronized(lock) {
-            infoRequestsInFlight.remove(id)
-            if (!state.groups.containsKey(id)) return false
-            if (resolved == null) {
-                infoRetryAfterEpochSeconds[id] = retryAfterEpochSeconds ?: Long.MAX_VALUE
-                return false
+            val key = infoKey(kind, id)
+            infoRequestsInFlight.remove(key)
+            val targets = targetsOf(kind)
+            val previous = targets[id] ?: return false
+            var changed = false
+            if (resolved != null && previous.isBlank()) {
+                targets[id] = resolved
+                changed = true
             }
-            infoRetryAfterEpochSeconds.remove(id)
-            if (state.groups[id] == resolved) return false
-            state.groups[id] = resolved
-            persistLocked()
-            return true
+            if (kind == TargetKind.USER && avatar != null && !state.userAvatars.containsKey(id)) {
+                state.userAvatars[id] = avatar.copy(kind = MediaKind.AVATAR)
+                changed = true
+            }
+            if (kind == TargetKind.GROUP && recordUnionOpenIdLocked(id, unionOpenId)) changed = true
+            if (targets[id].orEmpty().isNotBlank() && (kind == TargetKind.GROUP || state.userAvatars[id] != null)) {
+                infoRetryAfterEpochSeconds.remove(key)
+            } else {
+                infoRetryAfterEpochSeconds[key] = retryAfterEpochSeconds ?: Long.MAX_VALUE
+            }
+            if (changed) persistLocked()
+            return changed
         }
     }
 
@@ -234,12 +283,23 @@ internal class QqBotTargetLedger(
                     externalId = id,
                 ),
                 name = name.displayNameOr(id),
+                avatar = if (kind == TargetKind.USER) state.userAvatars[id] else null,
             )
         }
     }
 
     /** 展示名未知时回退为 openid，保证后台至少能显示一条可辨识的记录。 */
     private fun String.displayNameOr(fallback: String): String = takeIf { it.isNotBlank() } ?: fallback
+
+    private fun infoKey(kind: TargetKind, id: String): TargetAddress =
+        TargetAddress.of(QQBOT_PLATFORM_ID.value, kind, id)
+
+    private fun recordUnionOpenIdLocked(id: String, unionOpenId: String?): Boolean {
+        val resolved = unionOpenId?.trim()?.takeIf(String::isNotBlank) ?: return false
+        if (state.groupUnionOpenIds[id] == resolved) return false
+        state.groupUnionOpenIds[id] = resolved
+        return true
+    }
 
     private fun targetsOf(kind: TargetKind): MutableMap<String, String> = when (kind) {
         TargetKind.GROUP -> state.groups

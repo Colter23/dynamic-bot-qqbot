@@ -6,6 +6,8 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import top.colter.dynamic.core.data.TargetAddress
 import top.colter.dynamic.core.data.TargetKind
+import top.colter.dynamic.core.data.MediaKind
+import top.colter.dynamic.core.data.MediaRef
 
 class QqBotTargetLedgerTest {
     @Test
@@ -122,14 +124,14 @@ class QqBotTargetLedgerTest {
     }
 
     @Test
-    fun `只有群需要补全资料且失败后进入内存冷却`() {
+    fun `群和用户缺少资料时需要补全且失败后进入内存冷却`() {
         val ledger = ledger()
         ledger.record(TargetKind.GROUP, "group-1")
         ledger.record(TargetKind.USER, "user-1")
 
-        // 群缺名需要补全；用户目标官方无资料接口；未知目标不请求
+        // 群和用户缺少资料时补全；未知目标不请求
         assertTrue(ledger.needsInfo(TargetKind.GROUP, "group-1", nowEpochSeconds = 100L))
-        assertEquals(false, ledger.needsInfo(TargetKind.USER, "user-1", nowEpochSeconds = 100L))
+        assertTrue(ledger.needsInfo(TargetKind.USER, "user-1", nowEpochSeconds = 100L))
         assertEquals(false, ledger.needsInfo(TargetKind.GROUP, "missing", nowEpochSeconds = 100L))
 
         // 拉取失败后要等到重试时间才允许再请求
@@ -179,7 +181,7 @@ class QqBotTargetLedgerTest {
         assertEquals(true, ledger.tryBeginInfoRequest(TargetKind.GROUP, "group-1"))
         assertEquals(false, ledger.tryBeginInfoRequest(TargetKind.GROUP, "group-1"))
         assertEquals(false, ledger.needsInfo(TargetKind.GROUP, "group-1"))
-        // 用户目标没有资料接口，不占用名额
+        assertEquals(true, ledger.tryBeginInfoRequest(TargetKind.USER, "user-1"))
         assertEquals(false, ledger.tryBeginInfoRequest(TargetKind.USER, "user-1"))
     }
 
@@ -227,12 +229,69 @@ class QqBotTargetLedgerTest {
     }
 
     @Test
+    fun `用户资料和群统一标识持久化且删除时清理`() {
+        val store = FakePluginDataStore()
+        val ledger = QqBotTargetLedger(store)
+        val avatar = MediaRef("https://example.com/avatar.png", MediaKind.AVATAR)
+        ledger.record(TargetKind.USER, "user-1", name = "好友昵称", avatar = avatar)
+        ledger.record(TargetKind.GROUP, "group-1", unionOpenId = "union-group")
+
+        val reloaded = QqBotTargetLedger(store)
+        val candidate = reloaded.listCandidates(TargetKind.USER).single()
+        assertEquals("好友昵称", candidate.name)
+        assertEquals(avatar, candidate.avatar)
+        assertEquals(avatar, reloaded.findCandidate(candidate.address)?.avatar)
+        assertEquals(false, reloaded.needsInfo(TargetKind.USER, "user-1"))
+        val saved = store.savedValue(STORE_NAME) as QqBotTargetLedgerState
+        assertEquals("union-group", saved.groupUnionOpenIds["group-1"])
+
+        reloaded.markRemoved(TargetKind.USER, "user-1")
+        reloaded.markRemoved(TargetKind.GROUP, "group-1")
+        val removed = store.savedValue(STORE_NAME) as QqBotTargetLedgerState
+        assertTrue(removed.userAvatars.isEmpty())
+        assertTrue(removed.groupUnionOpenIds.isEmpty())
+    }
+
+    @Test
+    fun `接口资料不会覆盖请求期间收到的新资料且缺头像时有冷却`() {
+        val ledger = ledger()
+        ledger.record(TargetKind.USER, "user-1")
+        assertTrue(ledger.tryBeginInfoRequest(TargetKind.USER, "user-1"))
+        ledger.record(TargetKind.USER, "user-1", name = "新昵称")
+        ledger.recordInfo(TargetKind.USER, "user-1", "旧昵称", retryAfterEpochSeconds = 500L)
+        assertEquals("新昵称", ledger.listCandidates(TargetKind.USER).single().name)
+        assertEquals(false, ledger.needsInfo(TargetKind.USER, "user-1", nowEpochSeconds = 300L))
+        assertTrue(ledger.needsInfo(TargetKind.USER, "user-1", nowEpochSeconds = 500L))
+
+        val avatar = MediaRef("https://example.com/new.png", MediaKind.AVATAR)
+        ledger.record(TargetKind.USER, "user-1", name = "最新昵称", avatar = avatar)
+        ledger.recordInfo(TargetKind.USER, "user-1", "旧昵称", avatar = MediaRef("https://example.com/old.png"))
+        val candidate = ledger.listCandidates(TargetKind.USER).single()
+        assertEquals("最新昵称", candidate.name)
+        assertEquals(avatar, candidate.avatar)
+        assertEquals(false, ledger.needsInfo(TargetKind.USER, "user-1"))
+    }
+
+    @Test
+    fun `相同 OpenID 的用户和群不共享在途请求和冷却`() {
+        val ledger = ledger()
+        ledger.record(TargetKind.GROUP, "same-id")
+        ledger.record(TargetKind.USER, "same-id")
+        assertTrue(ledger.tryBeginInfoRequest(TargetKind.GROUP, "same-id"))
+        assertTrue(ledger.tryBeginInfoRequest(TargetKind.USER, "same-id"))
+        ledger.recordInfo(TargetKind.GROUP, "same-id", name = null, retryAfterEpochSeconds = 500L)
+        ledger.abandonInfoRequest(TargetKind.USER, "same-id")
+        assertTrue(ledger.needsInfo(TargetKind.USER, "same-id", nowEpochSeconds = 300L))
+        assertEquals(false, ledger.needsInfo(TargetKind.GROUP, "same-id", nowEpochSeconds = 300L))
+    }
+
+    @Test
     fun `入站事件提取目标 sighting`() {
         val groupMessage = QqBotIncomingEvent(
             type = QQBOT_GROUP_MESSAGE_CREATE,
             rawPayload = """
                 {"op":0,"s":1,"t":"GROUP_MESSAGE_CREATE","d":{
-                  "id":"msg-1","group_openid":"group-1","timestamp":"2026-07-01T00:00:00Z",
+                  "id":"msg-1","group_openid":"group-1","union_group_openid":"union-group-1","timestamp":"2026-07-01T00:00:00Z",
                   "author":{"member_openid":"member-1"},"content":"hi"}}
             """.trimIndent(),
         )
@@ -255,6 +314,7 @@ class QqBotTargetLedgerTest {
 
         assertEquals(TargetKind.GROUP, groupSighting?.kind)
         assertEquals("group-1", groupSighting?.externalId)
+        assertEquals("union-group-1", groupSighting?.unionOpenId)
         assertEquals(TargetKind.GROUP, addSighting?.kind)
         assertEquals("group-2", addSighting?.externalId)
         assertEquals(TargetKind.USER, friendSighting?.kind)

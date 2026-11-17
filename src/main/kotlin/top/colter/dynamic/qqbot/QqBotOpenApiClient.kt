@@ -181,7 +181,6 @@ internal class QqBotOpenApiClient(
      * 获取群基本信息。
      *
      * 官方标注该接口为白名单能力，机器人无权限时返回业务码 `11253`。
-     * 官方**没有**对应的好友/用户资料接口，只有群可以补全名称。
      */
     fun groupInfo(groupOpenid: String): QqBotGroupInfo {
         val action = "获取 QQ 官方机器人群信息"
@@ -198,6 +197,24 @@ internal class QqBotOpenApiClient(
             groupOpenid = root["group_openid"]?.asPrimitiveOrNull()?.contentOrNull?.trim().orEmpty(),
             name = root["group_name"]?.asPrimitiveOrNull()?.contentOrNull?.trim().orEmpty(),
             memberCount = root["group_member_num"]?.asPrimitiveOrNull()?.intOrNull,
+            unionOpenId = root["union_group_openid"]?.asPrimitiveOrNull()?.contentOrNull?.trim()?.takeIf(String::isNotBlank),
+        )
+    }
+
+    /** 获取好友资料（10 QPS）；没有好友关系时接口返回 `40184001`。 */
+    fun userInfo(userOpenid: String): QqBotUserInfo {
+        val action = "获取 QQ 官方机器人用户信息"
+        val response = authorizedRequest { headers ->
+            transport.get(
+                url = "$OPEN_API_BASE_URL/v2/users/${userOpenid.pathSegment()}/info",
+                headers = headers,
+            )
+        }
+        ensureSuccess(action, response)
+        val root = parseResponseObject(action, response.body)
+        return QqBotUserInfo(
+            name = root["username"]?.asPrimitiveOrNull()?.contentOrNull?.trim().orEmpty(),
+            avatar = root["avatar"]?.asPrimitiveOrNull()?.contentOrNull?.trim().orEmpty().toHttpsUrl(),
         )
     }
 
@@ -591,6 +608,13 @@ internal data class QqBotGroupInfo(
     val groupOpenid: String,
     val name: String,
     val memberCount: Int? = null,
+    val unionOpenId: String? = null,
+)
+
+/** 好友资料（`GET /v2/users/{user_openid}/info`）。 */
+internal data class QqBotUserInfo(
+    val name: String,
+    val avatar: String = "",
 )
 
 /** 机器人自身资料（`GET /users/@me`）。 */

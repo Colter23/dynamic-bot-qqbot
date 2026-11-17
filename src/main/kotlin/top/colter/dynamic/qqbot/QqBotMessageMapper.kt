@@ -14,6 +14,8 @@ import kotlinx.serialization.json.intOrNull
 import top.colter.dynamic.core.data.IncomingMessage
 import top.colter.dynamic.core.data.IncomingMessageReference
 import top.colter.dynamic.core.data.IncomingMessageSegment
+import top.colter.dynamic.core.data.MediaKind
+import top.colter.dynamic.core.data.MediaRef
 import top.colter.dynamic.core.data.MessageBatch
 import top.colter.dynamic.core.data.MessageContent
 import top.colter.dynamic.core.data.TargetAddress
@@ -34,10 +36,13 @@ internal data class QqBotSendRequest(
     val referenceMessageId: String? = null,
 )
 
-/** 从入站事件中提取到的目标：账本只需要类型与 openid。 */
+/** 从入站事件中提取目标及事件自带的资料。群成员资料不能作为群资料。 */
 internal data class QqBotTargetSighting(
     val kind: TargetKind,
     val externalId: String,
+    val unionOpenId: String? = null,
+    val name: String? = null,
+    val avatar: MediaRef? = null,
 )
 
 /**
@@ -375,8 +380,15 @@ internal object QqBotIncomingMessageMapper {
             ?: return null
         val data = dispatch.data.asObjectOrNull() ?: return null
         return when (event.type) {
-            QQBOT_C2C_MESSAGE_CREATE -> data.jsonString("author", "user_openid")
-                ?.let { QqBotTargetSighting(TargetKind.USER, it) }
+            QQBOT_C2C_MESSAGE_CREATE -> (data.jsonString("author", "user_openid") ?: data.jsonString("author", "openid"))
+                ?.let {
+                    QqBotTargetSighting(
+                        kind = TargetKind.USER,
+                        externalId = it,
+                        name = data.jsonString("author", "username"),
+                        avatar = data.jsonString("author", "avatar")?.toSenderAvatar(),
+                    )
+                }
             QQBOT_GROUP_AT_MESSAGE_CREATE,
             QQBOT_GROUP_MESSAGE_CREATE,
             QQBOT_GROUP_ADD_ROBOT,
@@ -384,7 +396,13 @@ internal object QqBotIncomingMessageMapper {
             QQBOT_GROUP_MSG_RECEIVE,
             QQBOT_GROUP_MSG_REJECT,
             -> data.jsonString("group_openid")
-                ?.let { QqBotTargetSighting(TargetKind.GROUP, it) }
+                ?.let {
+                    QqBotTargetSighting(
+                        kind = TargetKind.GROUP,
+                        externalId = it,
+                        unionOpenId = data.jsonString("union_group_openid"),
+                    )
+                }
             QQBOT_FRIEND_ADD,
             QQBOT_FRIEND_DEL,
             QQBOT_C2C_MSG_RECEIVE,
@@ -420,6 +438,7 @@ internal object QqBotIncomingMessageMapper {
         val senderId = jsonString("author", "user_openid") ?: jsonString("author", "openid") ?: return null
         val messageId = jsonString("id")
         val content = jsonString("content").orEmpty()
+        val author = get("author").asObjectOrNull()
         val attachments = attachments()
         val quoted = quotedMessage()
         val segments = buildSegments(content, attachments, arkLink = arkLinkSegment(event), quote = quoted?.toSegment())
@@ -432,6 +451,8 @@ internal object QqBotIncomingMessageMapper {
                 accountId = event.botAccountId,
             ),
             senderId = senderId,
+            senderName = author?.jsonString("username")?.trim()?.takeIf(String::isNotBlank),
+            senderAvatar = author?.jsonString("avatar")?.toSenderAvatar(),
             botAccountId = event.botAccountId,
             messageId = messageId.orEmpty(),
             replyTo = quoted?.toReference(),
@@ -448,6 +469,7 @@ internal object QqBotIncomingMessageMapper {
         val senderId = jsonString("author", "member_openid")
             ?: jsonString("author", "group_member_openid")
             ?: return null
+        val author = get("author").asObjectOrNull()
         val messageId = jsonString("id")
         val content = jsonString("content").orEmpty()
         val attachments = attachments()
@@ -470,6 +492,10 @@ internal object QqBotIncomingMessageMapper {
                 accountId = event.botAccountId,
             ),
             senderId = senderId,
+            senderName = author?.jsonString("member_nickname")
+                ?.trim()?.takeIf(String::isNotBlank)
+                ?: author?.jsonString("username")?.trim()?.takeIf(String::isNotBlank),
+            senderAvatar = author?.jsonString("avatar")?.toSenderAvatar(),
             botAccountId = event.botAccountId,
             messageId = messageId.orEmpty(),
             replyTo = quoted?.toReference(),
@@ -480,6 +506,16 @@ internal object QqBotIncomingMessageMapper {
             rawPayload = event.rawPayload,
             mentions = mentions,
         )
+    }
+
+    private fun String.toSenderAvatar(): MediaRef? {
+        val value = trim().takeIf(String::isNotBlank) ?: return null
+        val url = if (value.startsWith("http://", ignoreCase = true)) {
+            "https://${value.drop(7)}"
+        } else {
+            value
+        }
+        return MediaRef(uri = url, kind = MediaKind.AVATAR)
     }
 
     private fun List<QqBotIncomingMention>.mentionedAccountIds(event: QqBotIncomingEvent, mentionedBot: Boolean): Set<String> {

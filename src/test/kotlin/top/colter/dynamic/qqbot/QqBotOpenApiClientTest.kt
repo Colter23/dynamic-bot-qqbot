@@ -754,6 +754,7 @@ class QqBotOpenApiClientTest {
                         """
                             {
                               "group_openid":"group-openid",
+                              "union_group_openid":"union-group-openid",
                               "group_name":"测试群",
                               "group_finger_memo":"",
                               "group_member_num":5
@@ -771,11 +772,32 @@ class QqBotOpenApiClientTest {
         val info = client.groupInfo("group/open id")
 
         assertEquals("group-openid", info.groupOpenid)
+        assertEquals("union-group-openid", info.unionOpenId)
         assertEquals("测试群", info.name)
         assertEquals(5, info.memberCount)
         val request = transport.gets.single()
         assertEquals("https://api.bot.qq.com/v2/groups/group%2Fopen%20id/info", request.url)
         assertEquals("QQBot token-a", request.headers.getValue("Authorization"))
+    }
+
+    @Test
+    fun `用户资料接口解析昵称头像且正确编码路径`() {
+        val transport = FakeQqBotHttpTransport(
+            postResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"access_token":"token-a","expires_in":7200}""")),
+            ),
+            getResponses = ArrayDeque(
+                listOf(QqBotHttpResponse(200, """{"username":" 测试用户 ","avatar":"http://thirdqq.qlogo.cn/avatar","allow_proactive_msg":false}""")),
+            ),
+        )
+        val client = QqBotOpenApiClient(QqBotConfig(appId = "app-id", appSecret = "secret"), transport)
+
+        val info = client.userInfo("user/open id")
+
+        assertEquals("测试用户", info.name)
+        assertEquals("https://thirdqq.qlogo.cn/avatar", info.avatar)
+        assertEquals("https://api.bot.qq.com/v2/users/user%2Fopen%20id/info", transport.gets.single().url)
+        assertEquals("QQBot token-a", transport.gets.single().headers["Authorization"])
     }
 
     @Test

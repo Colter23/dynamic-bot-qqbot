@@ -2,6 +2,8 @@ package top.colter.dynamic.qqbot
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import top.colter.dynamic.core.data.TargetAddress
@@ -112,12 +114,13 @@ class QqBotTargetLedgerTest {
         ledger.record(TargetKind.GROUP, "group-1")
         assertEquals("group-1", ledger.listCandidates(TargetKind.GROUP).single().name)
 
-        assertEquals(true, ledger.recordInfo(TargetKind.GROUP, "group-1", "测试群"))
+        val request = assertNotNull(ledger.tryBeginInfoRequest(TargetKind.GROUP, "group-1"))
+        assertTrue(ledger.recordInfo(request, "测试群"))
 
         assertEquals("测试群", ledger.listCandidates(TargetKind.GROUP).single().name)
         assertEquals("测试群", ledger.findCandidate(TargetAddress.of("qq-official", TargetKind.GROUP, "group-1"))?.name)
         // 重复写入同一名称不落盘
-        assertEquals(false, ledger.recordInfo(TargetKind.GROUP, "group-1", "测试群"))
+        assertFalse(ledger.recordInfo(request, "测试群"))
         // 后续 sighting 不能把已补全的名称清空
         ledger.record(TargetKind.GROUP, "group-1")
         assertEquals("测试群", ledger.listCandidates(TargetKind.GROUP).single().name)
@@ -135,12 +138,14 @@ class QqBotTargetLedgerTest {
         assertEquals(false, ledger.needsInfo(TargetKind.GROUP, "missing", nowEpochSeconds = 100L))
 
         // 拉取失败后要等到重试时间才允许再请求
-        assertEquals(false, ledger.recordInfo(TargetKind.GROUP, "group-1", name = null, retryAfterEpochSeconds = 500L))
+        val firstRequest = assertNotNull(ledger.tryBeginInfoRequest(TargetKind.GROUP, "group-1", nowEpochSeconds = 100L))
+        assertFalse(ledger.recordInfo(firstRequest, name = null, retryAfterEpochSeconds = 500L))
         assertEquals(false, ledger.needsInfo(TargetKind.GROUP, "group-1", nowEpochSeconds = 300L))
         assertEquals(true, ledger.needsInfo(TargetKind.GROUP, "group-1", nowEpochSeconds = 500L))
 
         // 拿到名称后不再请求
-        ledger.recordInfo(TargetKind.GROUP, "group-1", "测试群")
+        val retry = assertNotNull(ledger.tryBeginInfoRequest(TargetKind.GROUP, "group-1", nowEpochSeconds = 500L))
+        ledger.recordInfo(retry, "测试群")
         assertEquals(false, ledger.needsInfo(TargetKind.GROUP, "group-1", nowEpochSeconds = 999_999_999L))
     }
 
@@ -149,7 +154,8 @@ class QqBotTargetLedgerTest {
         val store = FakePluginDataStore()
         QqBotTargetLedger(dataStore = store).apply {
             record(TargetKind.GROUP, "group-1")
-            recordInfo(TargetKind.GROUP, "group-1", name = null, retryAfterEpochSeconds = Long.MAX_VALUE)
+            val request = assertNotNull(tryBeginInfoRequest(TargetKind.GROUP, "group-1"))
+            recordInfo(request, name = null, retryAfterEpochSeconds = Long.MAX_VALUE)
         }
 
         // 重启后冷却不保留，允许再试一次（代价只有一次请求）
@@ -162,7 +168,8 @@ class QqBotTargetLedgerTest {
         val store = FakePluginDataStore()
         QqBotTargetLedger(dataStore = store).apply {
             record(TargetKind.GROUP, "group-1")
-            recordInfo(TargetKind.GROUP, "group-1", "测试群")
+            val request = assertNotNull(tryBeginInfoRequest(TargetKind.GROUP, "group-1"))
+            recordInfo(request, "测试群")
         }
 
         val reloaded = QqBotTargetLedger(dataStore = store)
@@ -178,11 +185,11 @@ class QqBotTargetLedgerTest {
         ledger.record(TargetKind.USER, "user-1")
 
         // 首次抢占成功；在途期间后续消息不得再次发起请求
-        assertEquals(true, ledger.tryBeginInfoRequest(TargetKind.GROUP, "group-1"))
-        assertEquals(false, ledger.tryBeginInfoRequest(TargetKind.GROUP, "group-1"))
+        assertNotNull(ledger.tryBeginInfoRequest(TargetKind.GROUP, "group-1"))
+        assertNull(ledger.tryBeginInfoRequest(TargetKind.GROUP, "group-1"))
         assertEquals(false, ledger.needsInfo(TargetKind.GROUP, "group-1"))
-        assertEquals(true, ledger.tryBeginInfoRequest(TargetKind.USER, "user-1"))
-        assertEquals(false, ledger.tryBeginInfoRequest(TargetKind.USER, "user-1"))
+        assertNotNull(ledger.tryBeginInfoRequest(TargetKind.USER, "user-1"))
+        assertNull(ledger.tryBeginInfoRequest(TargetKind.USER, "user-1"))
     }
 
     @Test
@@ -190,17 +197,17 @@ class QqBotTargetLedgerTest {
         // 成功路径：写入名称并释放名额，之后因已有名称不再请求
         val success = ledger()
         success.record(TargetKind.GROUP, "group-1")
-        assertEquals(true, success.tryBeginInfoRequest(TargetKind.GROUP, "group-1"))
-        assertEquals(true, success.recordInfo(TargetKind.GROUP, "group-1", "测试群"))
-        assertEquals(false, success.tryBeginInfoRequest(TargetKind.GROUP, "group-1"))
+        val successRequest = assertNotNull(success.tryBeginInfoRequest(TargetKind.GROUP, "group-1"))
+        assertTrue(success.recordInfo(successRequest, "测试群"))
+        assertNull(success.tryBeginInfoRequest(TargetKind.GROUP, "group-1"))
 
         // 失败路径：释放名额，但冷却期内仍不允许再次请求
         val failure = ledger()
         failure.record(TargetKind.GROUP, "group-2")
-        assertEquals(true, failure.tryBeginInfoRequest(TargetKind.GROUP, "group-2"))
-        failure.recordInfo(TargetKind.GROUP, "group-2", name = null, retryAfterEpochSeconds = 500L)
-        assertEquals(false, failure.tryBeginInfoRequest(TargetKind.GROUP, "group-2", nowEpochSeconds = 300L))
-        assertEquals(true, failure.tryBeginInfoRequest(TargetKind.GROUP, "group-2", nowEpochSeconds = 500L))
+        val failureRequest = assertNotNull(failure.tryBeginInfoRequest(TargetKind.GROUP, "group-2"))
+        failure.recordInfo(failureRequest, name = null, retryAfterEpochSeconds = 500L)
+        assertNull(failure.tryBeginInfoRequest(TargetKind.GROUP, "group-2", nowEpochSeconds = 300L))
+        assertNotNull(failure.tryBeginInfoRequest(TargetKind.GROUP, "group-2", nowEpochSeconds = 500L))
     }
 
     @Test
@@ -208,24 +215,40 @@ class QqBotTargetLedgerTest {
         val ledger = ledger()
         ledger.record(TargetKind.GROUP, "group-1")
 
-        assertEquals(true, ledger.tryBeginInfoRequest(TargetKind.GROUP, "group-1"))
-        ledger.abandonInfoRequest(TargetKind.GROUP, "group-1")
+        val request = assertNotNull(ledger.tryBeginInfoRequest(TargetKind.GROUP, "group-1"))
+        ledger.abandonInfoRequest(request)
 
         assertEquals(true, ledger.needsInfo(TargetKind.GROUP, "group-1"))
-        assertEquals(true, ledger.tryBeginInfoRequest(TargetKind.GROUP, "group-1"))
+        assertNotNull(ledger.tryBeginInfoRequest(TargetKind.GROUP, "group-1"))
     }
 
     @Test
-    fun `目标被移除时同时清理在途名额`() {
-        val ledger = ledger()
-        ledger.record(TargetKind.GROUP, "group-1")
-        ledger.tryBeginInfoRequest(TargetKind.GROUP, "group-1")
+    fun `删除后重新添加目标时旧请求不能更新资料或清除新占位`() {
+        for (kind in listOf(TargetKind.GROUP, TargetKind.USER)) {
+            val ledger = ledger()
+            val targetId = "target-1"
+            val avatar = MediaRef("https://example.com/avatar.png", MediaKind.AVATAR)
+            ledger.record(kind, targetId)
+            val oldRequest = assertNotNull(ledger.tryBeginInfoRequest(kind, targetId))
 
-        ledger.markRemoved(TargetKind.GROUP, "group-1")
-        ledger.record(TargetKind.GROUP, "group-1")
+            assertTrue(ledger.markRemoved(kind, targetId))
+            ledger.record(kind, targetId)
+            val newRequest = assertNotNull(ledger.tryBeginInfoRequest(kind, targetId))
 
-        // 重新加入后应能再次抢占（旧的在途名额已随移除清理）
-        assertEquals(true, ledger.tryBeginInfoRequest(TargetKind.GROUP, "group-1"))
+            assertFalse(ledger.shouldContinueInfoRequest(oldRequest))
+            assertFalse(ledger.recordInfo(oldRequest, name = null, retryAfterEpochSeconds = Long.MAX_VALUE))
+            assertTrue(ledger.shouldContinueInfoRequest(newRequest))
+            assertFalse(ledger.recordInfo(oldRequest, "旧名称", avatar = avatar, unionOpenId = "old-union"))
+            ledger.abandonInfoRequest(oldRequest)
+            assertTrue(ledger.shouldContinueInfoRequest(newRequest))
+            val candidate = ledger.listCandidates(kind).single()
+            assertEquals(targetId, candidate.name)
+            assertNull(candidate.avatar)
+
+            assertTrue(ledger.recordInfo(newRequest, "新名称", avatar = avatar))
+            assertEquals("新名称", ledger.listCandidates(kind).single().name)
+            assertFalse(ledger.needsInfo(kind, targetId))
+        }
     }
 
     @Test
@@ -256,16 +279,17 @@ class QqBotTargetLedgerTest {
     fun `接口资料不会覆盖请求期间收到的新资料且缺头像时有冷却`() {
         val ledger = ledger()
         ledger.record(TargetKind.USER, "user-1")
-        assertTrue(ledger.tryBeginInfoRequest(TargetKind.USER, "user-1"))
+        val request = assertNotNull(ledger.tryBeginInfoRequest(TargetKind.USER, "user-1"))
         ledger.record(TargetKind.USER, "user-1", name = "新昵称")
-        ledger.recordInfo(TargetKind.USER, "user-1", "旧昵称", retryAfterEpochSeconds = 500L)
+        ledger.recordInfo(request, "旧昵称", retryAfterEpochSeconds = 500L)
         assertEquals("新昵称", ledger.listCandidates(TargetKind.USER).single().name)
         assertEquals(false, ledger.needsInfo(TargetKind.USER, "user-1", nowEpochSeconds = 300L))
         assertTrue(ledger.needsInfo(TargetKind.USER, "user-1", nowEpochSeconds = 500L))
 
         val avatar = MediaRef("https://example.com/new.png", MediaKind.AVATAR)
+        val retry = assertNotNull(ledger.tryBeginInfoRequest(TargetKind.USER, "user-1", nowEpochSeconds = 500L))
         ledger.record(TargetKind.USER, "user-1", name = "最新昵称", avatar = avatar)
-        ledger.recordInfo(TargetKind.USER, "user-1", "旧昵称", avatar = MediaRef("https://example.com/old.png"))
+        ledger.recordInfo(retry, "旧昵称", avatar = MediaRef("https://example.com/old.png"))
         val candidate = ledger.listCandidates(TargetKind.USER).single()
         assertEquals("最新昵称", candidate.name)
         assertEquals(avatar, candidate.avatar)
@@ -277,10 +301,10 @@ class QqBotTargetLedgerTest {
         val ledger = ledger()
         ledger.record(TargetKind.GROUP, "same-id")
         ledger.record(TargetKind.USER, "same-id")
-        assertTrue(ledger.tryBeginInfoRequest(TargetKind.GROUP, "same-id"))
-        assertTrue(ledger.tryBeginInfoRequest(TargetKind.USER, "same-id"))
-        ledger.recordInfo(TargetKind.GROUP, "same-id", name = null, retryAfterEpochSeconds = 500L)
-        ledger.abandonInfoRequest(TargetKind.USER, "same-id")
+        val groupRequest = assertNotNull(ledger.tryBeginInfoRequest(TargetKind.GROUP, "same-id"))
+        val userRequest = assertNotNull(ledger.tryBeginInfoRequest(TargetKind.USER, "same-id"))
+        ledger.recordInfo(groupRequest, name = null, retryAfterEpochSeconds = 500L)
+        ledger.abandonInfoRequest(userRequest)
         assertTrue(ledger.needsInfo(TargetKind.USER, "same-id", nowEpochSeconds = 300L))
         assertEquals(false, ledger.needsInfo(TargetKind.GROUP, "same-id", nowEpochSeconds = 300L))
     }

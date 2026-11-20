@@ -507,22 +507,22 @@ public class QqBotGatewayPlugin :
         accountId: String,
         userOpenid: String,
     ) {
-        if (!ledger.tryBeginInfoRequest(TargetKind.USER, userOpenid)) return
+        val request = ledger.tryBeginInfoRequest(TargetKind.USER, userOpenid) ?: return
         val info = try {
             userInfoRateLimiter.withPermit {
-                if (!ledger.shouldContinueInfoRequest(TargetKind.USER, userOpenid)) {
-                    ledger.abandonInfoRequest(TargetKind.USER, userOpenid)
+                if (!ledger.shouldContinueInfoRequest(request)) {
+                    ledger.abandonInfoRequest(request)
                     return
                 }
                 gateway.userInfo(accountId, userOpenid)
             }
         } catch (error: CancellationException) {
-            ledger.abandonInfoRequest(TargetKind.USER, userOpenid)
+            ledger.abandonInfoRequest(request)
             throw error
         } catch (error: Throwable) {
             val cooldownSeconds = infoRetryCooldownSeconds(error)
             ledger.recordInfo(
-                TargetKind.USER, userOpenid, name = null,
+                request, name = null,
                 retryAfterEpochSeconds = System.currentTimeMillis() / 1000 + cooldownSeconds,
             )
             logger.warn(error) {
@@ -531,8 +531,7 @@ public class QqBotGatewayPlugin :
             return
         }
         ledger.recordInfo(
-            kind = TargetKind.USER,
-            externalId = userOpenid,
+            request = request,
             name = info?.name,
             avatar = info?.avatar?.takeIf(String::isNotBlank)?.let { MediaRef(it, MediaKind.AVATAR) },
             retryAfterEpochSeconds = System.currentTimeMillis() / 1000 + INFO_RETRY_PERMANENT_SECONDS,
@@ -571,24 +570,23 @@ public class QqBotGatewayPlugin :
         accountId: String,
         groupOpenid: String,
     ) {
-        if (!ledger.tryBeginInfoRequest(TargetKind.GROUP, groupOpenid)) return
+        val request = ledger.tryBeginInfoRequest(TargetKind.GROUP, groupOpenid) ?: return
         val info = try {
             groupInfoRateLimiter.withPermit {
-                if (!ledger.shouldContinueInfoRequest(TargetKind.GROUP, groupOpenid)) {
-                    ledger.abandonInfoRequest(TargetKind.GROUP, groupOpenid)
+                if (!ledger.shouldContinueInfoRequest(request)) {
+                    ledger.abandonInfoRequest(request)
                     return
                 }
                 gateway.groupInfo(accountId, groupOpenid)
             }
         } catch (error: CancellationException) {
             // 插件停止：释放名额后原样抛出，不登记任何冷却
-            ledger.abandonInfoRequest(TargetKind.GROUP, groupOpenid)
+            ledger.abandonInfoRequest(request)
             throw error
         } catch (error: Throwable) {
             val cooldownSeconds = infoRetryCooldownSeconds(error)
             ledger.recordInfo(
-                kind = TargetKind.GROUP,
-                externalId = groupOpenid,
+                request = request,
                 name = null,
                 retryAfterEpochSeconds = System.currentTimeMillis() / 1000 + cooldownSeconds,
             )
@@ -604,8 +602,7 @@ public class QqBotGatewayPlugin :
             // 网关不支持资料查询：长期不再尝试
             info == null -> {
                 ledger.recordInfo(
-                    kind = TargetKind.GROUP,
-                    externalId = groupOpenid,
+                    request = request,
                     name = null,
                     retryAfterEpochSeconds = nowEpochSeconds + INFO_RETRY_PERMANENT_SECONDS,
                 )
@@ -614,8 +611,7 @@ public class QqBotGatewayPlugin :
             // 接口成功但没给出名称：按取不到处理，日志不能谎报"已补全"
             name == null -> {
                 ledger.recordInfo(
-                    kind = TargetKind.GROUP,
-                    externalId = groupOpenid,
+                    request = request,
                     name = null,
                     retryAfterEpochSeconds = nowEpochSeconds + INFO_RETRY_PERMANENT_SECONDS,
                     unionOpenId = info.unionOpenId,
@@ -626,9 +622,10 @@ public class QqBotGatewayPlugin :
                 }
             }
             else -> {
-                ledger.recordInfo(TargetKind.GROUP, groupOpenid, name, unionOpenId = info.unionOpenId)
-                logger.info {
-                    "QQ 官方机器人群资料已补全：name=$name members=${info.memberCount ?: "-"} group=$groupOpenid"
+                if (ledger.recordInfo(request, name, unionOpenId = info.unionOpenId)) {
+                    logger.info {
+                        "QQ 官方机器人群资料已补全：name=$name members=${info.memberCount ?: "-"} group=$groupOpenid"
+                    }
                 }
             }
         }

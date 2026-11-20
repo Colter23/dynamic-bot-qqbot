@@ -15,6 +15,8 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import top.colter.dynamic.core.data.MediaKind
 import top.colter.dynamic.core.data.MediaRef
@@ -43,7 +45,7 @@ class QqBotGatewayPluginTargetInfoTest {
                 assertTrue(gateway.started.isCompleted)
                 plugin.onIncomingEvent(messageEvent(kind, "queued"))
                 runCurrent()
-                assertTrue(ledger.shouldContinueInfoRequest(kind, "queued"))
+                assertFalse(ledger.needsInfo(kind, "queued"))
 
                 if (kind == TargetKind.USER) {
                     plugin.onIncomingEvent(userMessageEvent(withProfile = true, openid = "queued"))
@@ -76,7 +78,7 @@ class QqBotGatewayPluginTargetInfoTest {
                 runCurrent()
                 plugin.onIncomingEvent(messageEvent(kind, "queued"))
                 runCurrent()
-                assertTrue(ledger.shouldContinueInfoRequest(kind, "queued"))
+                assertFalse(ledger.needsInfo(kind, "queued"))
 
                 ledger.markRemoved(kind, "queued")
                 gateway.release()
@@ -86,7 +88,7 @@ class QqBotGatewayPluginTargetInfoTest {
                 assertEquals(listOf("first"), requested)
                 assertEquals(listOf("first"), ledger.listCandidates(kind).map { it.address.externalId })
                 ledger.record(kind, "queued")
-                assertTrue(ledger.tryBeginInfoRequest(kind, "queued"))
+                assertNotNull(ledger.tryBeginInfoRequest(kind, "queued"))
             } finally {
                 plugin.callPrivate("stopIncomingScope")
                 scope.cancel()
@@ -106,7 +108,7 @@ class QqBotGatewayPluginTargetInfoTest {
             runCurrent()
             plugin.onIncomingEvent(userMessageEvent(openid = "queued"))
             runCurrent()
-            assertTrue(ledger.shouldContinueInfoRequest(TargetKind.USER, "queued"))
+            assertFalse(ledger.needsInfo(TargetKind.USER, "queued"))
 
             plugin.callPrivate("stopIncomingScope")
             runCurrent()

@@ -60,6 +60,8 @@ internal class QqBotTargetLedger(
     private val dataStore: PluginDataStore,
     private val nowEpochSeconds: () -> Long = { System.currentTimeMillis() / 1000 },
 ) {
+    class InfoRequest internal constructor(val address: TargetAddress)
+
     private val lock = Any()
 
     private var state: QqBotTargetLedgerState = QqBotTargetLedgerState()
@@ -79,7 +81,7 @@ internal class QqBotTargetLedger(
      * 这段网络往返里，该群每来一条消息都会再触发一次请求（群资料接口是白名单能力，有频控）。
      * 由 [tryBeginInfoRequest] 占位，[recordInfo] / [abandonInfoRequest] 释放。
      */
-    private val infoRequestsInFlight: MutableSet<TargetAddress> = mutableSetOf()
+    private val infoRequestsInFlight: MutableMap<TargetAddress, InfoRequest> = mutableMapOf()
 
     init {
         state = loadState()
@@ -182,41 +184,37 @@ internal class QqBotTargetLedger(
     /**
      * 抢占一个资料请求名额。
      *
-     * 返回 true 表示调用方获得发起请求的资格；false 表示该目标不需要资料、已有请求在途，
-     * 或仍在失败冷却期内。请求结束后**必须**调用 [recordInfo]（拿到结果）或
-     * [abandonInfoRequest]（被取消）释放名额，否则该目标在本次运行内不会再被请求。
+     * 返回本次请求的令牌；目标资料完整、已有请求在途或仍在冷却时返回 null。
+     * 请求结束后用同一令牌调用 [recordInfo] 或 [abandonInfoRequest] 释放名额。
      */
     fun tryBeginInfoRequest(
         kind: TargetKind,
         externalId: String,
         nowEpochSeconds: Long? = null,
-    ): Boolean {
-        if (!isSupported(kind)) return false
+    ): InfoRequest? {
+        if (!isSupported(kind)) return null
         val id = externalId.trim()
         val now = nowEpochSeconds ?: this.nowEpochSeconds()
         synchronized(lock) {
-            if (!needsInfoLocked(kind, id, now)) return false
-            infoRequestsInFlight.add(infoKey(kind, id))
-            return true
+            if (!needsInfoLocked(kind, id, now)) return null
+            val key = infoKey(kind, id)
+            return InfoRequest(key).also { infoRequestsInFlight[key] = it }
         }
     }
 
     /** 放弃一个已抢占的资料请求名额（请求被取消、没有结果可登记时使用）。 */
-    fun abandonInfoRequest(kind: TargetKind, externalId: String) {
-        if (!isSupported(kind)) return
-        val id = externalId.trim()
+    fun abandonInfoRequest(request: InfoRequest) {
         synchronized(lock) {
-            infoRequestsInFlight.remove(infoKey(kind, id))
+            infoRequestsInFlight.remove(request.address, request)
         }
     }
 
     /** 限频等待结束后复查已占位的请求；忽略该请求自身的在途标记。 */
-    fun shouldContinueInfoRequest(kind: TargetKind, externalId: String): Boolean {
-        if (!isSupported(kind)) return false
-        val id = externalId.trim()
+    fun shouldContinueInfoRequest(request: InfoRequest): Boolean {
+        val key = request.address
         synchronized(lock) {
-            val key = infoKey(kind, id)
-            return key in infoRequestsInFlight && needsInfoLocked(kind, id, nowEpochSeconds(), ignoreInFlight = true)
+            return infoRequestsInFlight[key] === request &&
+                needsInfoLocked(key.kind, key.externalId, nowEpochSeconds(), ignoreInFlight = true)
         }
     }
 
@@ -236,22 +234,21 @@ internal class QqBotTargetLedger(
      * 只补充缺少的昵称/头像，避免覆盖请求期间收到的事件资料；群统一标识独立保存。
      * 未补齐资料时登记内存冷却，避免部分资料缺失导致每条消息都查询接口。
      *
-     * 无论成功失败都会释放 [tryBeginInfoRequest] 抢占的名额。
+     * 只有当前令牌能释放名额并更新资料或冷却时间。
      */
     fun recordInfo(
-        kind: TargetKind,
-        externalId: String,
+        request: InfoRequest,
         name: String?,
         retryAfterEpochSeconds: Long? = null,
         avatar: MediaRef? = null,
         unionOpenId: String? = null,
     ): Boolean {
-        if (!isSupported(kind)) return false
-        val id = externalId.trim()
+        val key = request.address
+        val kind = key.kind
+        val id = key.externalId
         val resolved = name?.trim()?.takeIf { it.isNotBlank() }
         synchronized(lock) {
-            val key = infoKey(kind, id)
-            infoRequestsInFlight.remove(key)
+            if (!infoRequestsInFlight.remove(key, request)) return false
             val targets = targetsOf(kind)
             val previous = targets[id] ?: return false
             var changed = false
